@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Gaithano Speak</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Gaithano Speak listens to your microphone while you hold the dictation key, so it can turn your speech into text.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Gaithano Speak briefly checks whether audio is actually playing so it only pauses real playback while you dictate — it measures the output level and never records or stores any audio.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Gaithano Speak uses on-device speech recognition to transcribe your dictation.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Speech recognition powered by NVIDIA Parakeet (CC-BY-4.0) via FluidAudio.</string>
+</dict>
+</plist>
