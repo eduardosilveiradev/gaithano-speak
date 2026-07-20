@@ -12,6 +12,19 @@ import SpeakCore
 struct AgentModel: Sendable {
     let credentials: GoogleCredentials
     let config: TalkConfig
+    var retryPolicy: VertexRetryPolicy = .default
+
+    /// A throttle worth waiting out, as distinct from a failure worth reporting.
+    ///
+    /// Internal to the send path and never escapes: `sendRetryingTransients` either
+    /// retries it or converts it to `ModelError.http` once the attempts run out, so
+    /// callers still see exactly one error type.
+    private struct TransientFailure: Error {
+        let status: Int
+        let message: String
+        /// The server's `Retry-After`, in seconds, when it sent one.
+        let retryAfter: TimeInterval?
+    }
 
     enum ModelError: LocalizedError {
         case notConfigured(String)
@@ -181,11 +194,42 @@ struct AgentModel: Sendable {
 
         let body = try JSONSerialization.data(withJSONObject: payload)
         do {
-            return try await send(project: project, body: body)
+            return try await sendRetryingTransients(project: project, body: body)
         } catch ModelError.http(401, _) {
             await credentials.invalidate()
             Log.talk.info("Agent got 401 from Vertex; retrying with a fresh token")
-            return try await send(project: project, body: body)
+            return try await sendRetryingTransients(project: project, body: body)
+        }
+    }
+
+    /// Retry the shared-pool throttles, and only those.
+    ///
+    /// This project's traffic is `ON_DEMAND`, so a 429 is the pool being momentarily
+    /// busy rather than a limit the user has exceeded — see `VertexRetryPolicy`. The
+    /// agent is the caller that can least afford to give up on one: it has no fallback
+    /// (a model that can't call tools isn't a degraded agent, it's a narrator), and by
+    /// the time step 6 fails the run has already clicked through five real steps.
+    ///
+    /// Kept separate from the 401 retry above rather than folded in with it. A 401 is
+    /// a stale token — retry it once, immediately, with a new one, and a second 401
+    /// means something is actually wrong. Waiting would only add latency to a case
+    /// where waiting never helps.
+    private func sendRetryingTransients(project: String, body: Data) async throws -> Turn {
+        var attempt = 1
+        while true {
+            do {
+                return try await send(project: project, body: body)
+            } catch let transient as TransientFailure {
+                guard let delay = retryPolicy.delay(afterAttempt: attempt,
+                                                    serverHint: transient.retryAfter) else {
+                    Log.talk.error("Agent gave up after \(attempt) attempts: Vertex \(transient.status)")
+                    throw ModelError.http(transient.status, transient.message)
+                }
+                let status = transient.status
+                Log.talk.info("Vertex \(status) on attempt \(attempt); retrying in \(delay)s")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                attempt += 1
+            }
         }
     }
 
@@ -204,8 +248,18 @@ struct AgentModel: Sendable {
             throw ModelError.http(0, "no HTTP response")
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw ModelError.http(http.statusCode,
-                                  StreamChunkParser.errorMessage(fromBody: data) ?? "")
+            let message = StreamChunkParser.errorMessage(fromBody: data) ?? ""
+            // Transient throttles leave by a different door, carrying the server's own
+            // advice on when to come back. Everything else is a real failure and goes
+            // straight out as `ModelError` — retrying it would only repeat it.
+            if VertexRetryPolicy.isTransient(http.statusCode) {
+                throw TransientFailure(
+                    status: http.statusCode,
+                    message: message,
+                    retryAfter: VertexRetryPolicy.retryAfterSeconds(
+                        http.value(forHTTPHeaderField: "Retry-After")))
+            }
+            throw ModelError.http(http.statusCode, message)
         }
         return try Self.parse(responseBody: data)
     }
