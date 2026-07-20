@@ -46,6 +46,9 @@ enum AgentExecutor {
                 fromImage: CGPoint(x: x, y: y), in: shot)
             try scroll(at: point, amount: amount, source: source)
 
+        case let .switchTab(target):
+            try switchTab(to: target, source: source)
+
         case .done:
             return   // not an action on the machine
         }
@@ -121,6 +124,26 @@ enum AgentExecutor {
             up.post(tap: .cghidEventTap)
             index = end
             try? await Task.sleep(nanoseconds: 1_500_000)
+        }
+    }
+
+    /// Tab switching rides on the same shortcuts a person would use, rather than an
+    /// app-specific AppleScript per browser: ⌘1–9 is honoured by Chrome, Safari, Arc,
+    /// Firefox, Xcode, VS Code, and every terminal worth naming, and ⌃⇥ cycles in all
+    /// of them too. Nothing here is browser-aware, so nothing here breaks when the
+    /// user's browser changes.
+    private static func switchTab(to target: TabTarget,
+                                  source: CGEventSource) throws {
+        switch target {
+        case let .index(n):
+            // Clamped, not rejected. There is no ⌘10, and 9 already means "last" in
+            // the apps that matter — so a model asking for tab 12 gets the end of the
+            // strip, which is far likelier to be what it meant than an error.
+            try press("cmd+\(min(max(n, 1), 9))", source: source)
+        case .next:
+            try press("ctrl+tab", source: source)
+        case .previous:
+            try press("ctrl+shift+tab", source: source)
         }
     }
 

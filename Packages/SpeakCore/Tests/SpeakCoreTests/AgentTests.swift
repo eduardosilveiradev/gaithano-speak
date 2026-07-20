@@ -86,6 +86,30 @@ struct AgentRiskPolicyTests {
         #expect(risk(.press("return"), secure: true).isBlocked)
     }
 
+    @Test("Switching tabs runs unattended")
+    func tabSwitchIsSafe() {
+        #expect(risk(.switchTab(.index(3))) == .safe)
+        #expect(risk(.switchTab(.next)) == .safe)
+        #expect(risk(.switchTab(.previous)) == .safe)
+    }
+
+    /// Navigating away from a focused password field is confirmed, not blocked —
+    /// `.blocked` stops the run outright, which is the wrong response to a keystroke
+    /// that reveals nothing. But it must not run unattended either.
+    @Test("A tab switch during secure input is confirmed rather than blocked")
+    func tabSwitchUnderSecureInput() {
+        let r = risk(.switchTab(.next), secure: true)
+        #expect(r.needsConfirmation)
+        #expect(!r.isBlocked)
+    }
+
+    /// The blanket app rule has to cover new actions automatically, or every action
+    /// added later silently escapes it.
+    @Test("Sensitive apps confirm tab switches too")
+    func tabSwitchInSensitiveApp() {
+        #expect(risk(.switchTab(.index(2)), app: "Warp").needsConfirmation)
+    }
+
     @Test("Finishing is never gated")
     func doneIsSafe() {
         #expect(risk(.done("sent the email"), app: "Terminal") == .safe)
@@ -191,6 +215,27 @@ struct AgentSessionTests {
         #expect(s.handle(.userConfirmed).isEmpty)
         #expect(s.handle(.userEnabledAuto).isEmpty)
         #expect(!s.autoConfirm)
+    }
+}
+
+// MARK: - Tab targets
+
+@Suite("Agent tab switching")
+struct AgentTabTargetTests {
+
+    /// The summary is what the user reads in the step list before approving, so a
+    /// switch has to name where it's going rather than say "switch tab".
+    @Test("A tab switch says where it's going")
+    func summaryNamesTarget() {
+        #expect(AgentAction.switchTab(.index(4)).summary == "switch to tab 4")
+        #expect(AgentAction.switchTab(.next).summary == "switch to the next tab")
+        #expect(AgentAction.switchTab(.previous).summary == "switch to the previous tab")
+    }
+
+    @Test("Targets are distinguishable")
+    func equality() {
+        #expect(AgentAction.switchTab(.index(1)) != AgentAction.switchTab(.index(2)))
+        #expect(AgentAction.switchTab(.next) != AgentAction.switchTab(.previous))
     }
 }
 

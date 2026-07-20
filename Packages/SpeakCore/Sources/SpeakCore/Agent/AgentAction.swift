@@ -1,5 +1,27 @@
 import Foundation
 
+/// Which tab `AgentAction.switchTab` should move to.
+///
+/// Deliberately not a raw index alone: past nine tabs the number shortcuts run out,
+/// and cycling is the only way to reach the rest. Modelling both here keeps the
+/// executor's fallback visible rather than hidden behind a clamp.
+public enum TabTarget: Equatable, Sendable {
+    /// 1-based position in the tab strip. Chrome, Safari, and most editors bind 9 to
+    /// *the last tab* rather than the ninth one — a quirk worth knowing when reading
+    /// a step list that says "tab 9".
+    case index(Int)
+    case next
+    case previous
+
+    public var summary: String {
+        switch self {
+        case let .index(n): return "tab \(n)"
+        case .next: return "the next tab"
+        case .previous: return "the previous tab"
+        }
+    }
+}
+
 /// One thing the agent wants to do to the machine.
 ///
 /// Coordinates are in *image space* — the pixel grid of the screenshot the model was
@@ -14,6 +36,10 @@ public enum AgentAction: Equatable, Sendable {
     /// A chord such as `cmd+a` or a bare key such as `return`.
     case press(String)
     case scroll(x: Int, y: Int, amount: Int)
+    /// Move to another tab in the frontmost app. Exists as its own action rather than
+    /// a `press("cmd+2")` so the step list reads as navigation and the risk policy can
+    /// classify it on intent — a bare chord would have to be pattern-matched back.
+    case switchTab(TabTarget)
     /// The agent believes the task is complete. Carries what it did, for the panel.
     case done(String)
 
@@ -29,6 +55,8 @@ public enum AgentAction: Equatable, Sendable {
             return "press \(keys)"
         case let .scroll(_, _, amount):
             return "scroll \(amount > 0 ? "down" : "up")"
+        case let .switchTab(target):
+            return "switch to \(target.summary)"
         case let .done(summary):
             return summary
         }
@@ -139,6 +167,13 @@ public struct AgentRiskPolicy: Sendable {
         if secureInputActive, case .press = action {
             return .blocked("a password field has focus")
         }
+        // Confirmed rather than blocked: `.blocked` is for actions where *asking*
+        // would launder the risk, and navigating away from a password field isn't
+        // that. It still doesn't run unattended — an agent that wants to leave a
+        // credential prompt mid-task is worth a glance.
+        if secureInputActive, case .switchTab = action {
+            return .confirm("a password field has focus")
+        }
 
         if let app, alwaysConfirmApps.contains(app.lowercased()) {
             // `.done` is not an action on the machine, so it never needs approval.
@@ -160,6 +195,11 @@ public struct AgentRiskPolicy: Sendable {
             if normalizedRiskyCombos.contains(normalizedCombo(keys)) {
                 return .confirm("\(keys) usually sends or deletes")
             }
+            return .safe
+
+        case .switchTab:
+            // Navigation is reversible and reveals nothing: the next screenshot shows
+            // the user exactly where it went.
             return .safe
 
         case .type, .scroll, .done:

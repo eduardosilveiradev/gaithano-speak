@@ -114,6 +114,26 @@ struct AgentModel: Sendable {
                 ],
             ],
             [
+                "name": "switch_tab",
+                "description": "Switch tabs in the frontmost app — browser, editor, "
+                    + "or terminal. Prefer this over clicking a tab: the strip is "
+                    + "often too crowded to hit accurately, and the tab you want may "
+                    + "be scrolled out of view entirely.",
+                "parameters": [
+                    "type": "OBJECT",
+                    "properties": [
+                        "target": [
+                            "type": "STRING",
+                            "description": "A tab number from 1 to 9, where 9 means "
+                                + "the LAST tab rather than the ninth. Or 'next' / "
+                                + "'previous' to cycle, which is the only way to "
+                                + "reach tabs past the ninth.",
+                        ],
+                    ],
+                    "required": ["target"],
+                ],
+            ],
+            [
                 "name": "done",
                 "description": "The task is finished, or you have stopped because you "
                     + "cannot safely continue. Explain which.",
@@ -274,6 +294,12 @@ struct AgentModel: Sendable {
             }
             return .scroll(x: x, y: y, amount: int(args["amount"]) ?? 300)
 
+        case "switch_tab":
+            guard let target = tabTarget(args["target"]) else {
+                throw ModelError.badArguments("switch_tab without a usable target")
+            }
+            return .switchTab(target)
+
         case "done":
             let summary = (args["summary"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -282,6 +308,27 @@ struct AgentModel: Sendable {
         default:
             throw ModelError.badArguments("unknown tool '\(name)'")
         }
+    }
+
+    /// Accepts what the schema asks for (`"3"`, `"next"`) and what models send anyway
+    /// (a bare `3`, `"tab 3"`, `"right"`). An unparseable target returns nil rather
+    /// than defaulting to a direction — guessing which way to move is worse than
+    /// telling the model its argument was wrong and letting it retry.
+    private static func tabTarget(_ value: Any?) -> TabTarget? {
+        if let n = int(value) { return .index(n) }
+        guard let raw = (value as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(), !raw.isEmpty else { return nil }
+
+        switch raw {
+        case "next", "right", "forward": return .next
+        case "previous", "prev", "left", "back": return .previous
+        default: break
+        }
+        // "tab 3" / "tab3" — pull the first run of digits out.
+        let digits = raw.drop { !$0.isNumber }.prefix { $0.isNumber }
+        if let n = Int(digits) { return .index(n) }
+        return nil
     }
 
     /// Gemini sends integers as `NSNumber`, but a model that writes `"x": "412"` is
