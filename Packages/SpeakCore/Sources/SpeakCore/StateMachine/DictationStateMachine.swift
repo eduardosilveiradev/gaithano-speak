@@ -162,6 +162,11 @@ public struct DictationTimings: Equatable, Sendable {
     /// is pressed within it, the whole thing is a silent no-op — this is what
     /// keeps Option-based shortcuts (e.g. Raycast) from conflicting. A release
     /// within it instead opens the double-tap window.
+    ///
+    /// Zero means commit instantly, which is the current default: the half-second
+    /// wait was the most-felt latency in the app. The trade is real and deliberate —
+    /// at zero there is no window in which a combo can be recognised as a combo, so
+    /// ⌥-shortcuts start a dictation. Raise it to restore that protection.
     public var minHold: TimeInterval
     /// How long to wait for a second press to lock hands-free.
     public var lockWindow: TimeInterval
@@ -170,7 +175,7 @@ public struct DictationTimings: Equatable, Sendable {
     /// How long a notice stays on screen.
     public var noticeDuration: TimeInterval
 
-    public init(minHold: TimeInterval = 0.5,
+    public init(minHold: TimeInterval = 0,
                 lockWindow: TimeInterval = 0.30,
                 maxDuration: TimeInterval = 300,
                 noticeDuration: TimeInterval = 1.2) {

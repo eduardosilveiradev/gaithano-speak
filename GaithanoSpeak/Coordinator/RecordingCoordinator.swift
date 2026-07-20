@@ -80,6 +80,9 @@ final class RecordingCoordinator {
     /// "arming" progress bar. Zero outside the provisional window.
     var armingProgress: Double {
         guard case .recording(_, false) = state, let start = recordingStartedAt else { return 0 }
+        // A zero grace window commits instantly, so there's no progress to show —
+        // and dividing by it would hand the overlay a NaN width.
+        guard timings.minHold > 0 else { return 1 }
         return min(1, max(0, Date().timeIntervalSince(start) / timings.minHold))
     }
 

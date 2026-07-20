@@ -54,7 +54,9 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 ### Non-obvious invariants
 
-**Option-as-modifier.** The hotkey is the Option key, which users also press for ⌥←, ⌥e, ⌥Tab, Raycast. The design resolving this: `optionDown` starts capture *provisionally* and silently. Only after `minHold` (0.5s) does dictation "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`). `HotkeyMonitor` never consumes the modifier; it consumes Esc only while a dictation is active. Don't add feedback before commit, and don't consume Option.
+**Option-as-modifier.** The hotkey is the Option key, which users also press for ⌥←, ⌥e, ⌥Tab, Raycast. The mechanism resolving this: `optionDown` starts capture *provisionally* and silently, and only after `minHold` does dictation "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`).
+
+**`minHold` currently defaults to 0**, which switches that protection off: the user asked for instant start, judging the half-second wait worse than the collisions. ⌥-combos now start a dictation. The machinery is intact and timing-driven, so raising `minHold` restores it — keep the provisional/commit split and the abandon path working, and don't collapse them into "commit immediately" just because the default makes the window empty. `HotkeyMonitor` never consumes the modifier; it consumes Esc only while a dictation is active. Don't add feedback before commit, and don't consume Option.
 
 **Secure input.** When a password field has focus the machine goes to `.blockedSecureInput` and the hotkey is disarmed. If secure input turns on mid-dictation, insertion reroutes to the clipboard rather than synthesized keystrokes.
 

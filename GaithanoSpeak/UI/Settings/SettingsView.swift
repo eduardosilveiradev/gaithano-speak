@@ -24,7 +24,7 @@ struct SettingsView: View {
                 Toggle("Pause other audio while listening", isOn: bind(\.pauseAudioWhileListening))
                 Text("Sends the play/pause media key (needs Accessibility). Only fires when audio is actually playing, so it won’t start music when nothing was on.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Tip: hold the key alone for half a second before it starts, so combos like Raycast’s Option shortcuts don’t trigger dictation.")
+                Text("Dictation starts the instant you press the key. The trade-off: Option combos like ⌥← or Raycast’s shortcuts will also start one — tap esc, or just let it transcribe nothing.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
