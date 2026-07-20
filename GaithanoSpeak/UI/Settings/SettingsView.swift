@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Bindable var environment: AppEnvironment
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var serverTest: String?
+    @State private var needsScreenRecording = false
 
     var body: some View {
         Form {
@@ -52,6 +53,41 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Talk") {
+                Toggle("Hold Control while speaking to ask a model", isOn: bind(\.talkEnabled))
+                Text("⌃⌥ instead of ⌥: your words go to a model and the answer appears in a panel instead of being typed. ⌘C copies it, ⌘↩ inserts it, esc closes.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if environment.settings.talkEnabled {
+                    Picker("Provider", selection: bind(\.talkProvider)) {
+                        ForEach(TalkProviderID.allCases, id: \.self) { provider in
+                            Text(provider.displayName).tag(provider)
+                        }
+                    }
+                    if environment.settings.talkProvider == .vertexGemini {
+                        vertexFields
+                    }
+                    Toggle("Send a screenshot of the focused window", isOn: bind(\.talkVisionEnabled))
+                        .onChange(of: environment.settings.talkVisionEnabled) { _, enabled in
+                            // Ask up front rather than at the moment of the first
+                            // question — the prompt would otherwise interrupt speech.
+                            if enabled && !PermissionsService.requestScreenRecording() {
+                                needsScreenRecording = true
+                            }
+                        }
+                    Text(visionCaption)
+                        .font(.caption).foregroundStyle(.secondary)
+                    if needsScreenRecording && !PermissionsService.screenRecordingGranted {
+                        HStack {
+                            Text("Screen Recording isn't granted yet.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Open Settings") { PermissionsService.openScreenRecordingSettings() }
+                                .controlSize(.small)
+                        }
+                    }
+                }
+            }
+
             Section("General") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
@@ -62,6 +98,40 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460, height: 420)
+    }
+
+    @ViewBuilder private var vertexFields: some View {
+        TextField("Model", text: bind(\.talkModel))
+            .textFieldStyle(.roundedBorder)
+        TextField("GCP project (blank = your gcloud default)", text: bind(\.vertexProjectID))
+            .textFieldStyle(.roundedBorder)
+        if GoogleCredentials.isConfigured {
+            Label(credentialsCaption, systemImage: "checkmark.seal")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Label("No gcloud credentials found — run `gcloud auth application-default login` in Terminal. Until then, Talk falls back to your local server.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var credentialsCaption: String {
+        guard let project = GoogleCredentials.defaultProjectID else {
+            return "Signed in with gcloud."
+        }
+        return "Signed in with gcloud (project \(project))."
+    }
+
+    /// Vision is the one setting here that changes what leaves the machine, so the
+    /// caption says so plainly rather than burying it.
+    private var visionCaption: String {
+        if !environment.settings.talkVisionEnabled {
+            return "Off: only your spoken question and any selected text are sent."
+        }
+        let destination = environment.settings.talkProvider.isCloud
+            ? "uploaded to Google"
+            : "sent to your local server"
+        return "An image of whatever window you're in is \(destination) with each new question. Requires the Screen Recording permission."
     }
 
     @ViewBuilder private var localServerFields: some View {

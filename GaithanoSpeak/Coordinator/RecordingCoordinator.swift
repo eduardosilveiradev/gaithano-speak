@@ -15,6 +15,12 @@ final class RecordingCoordinator {
     /// transcription bubble while the user is still speaking. Empty when idle or
     /// when the preview model isn't available.
     private(set) var livePartial: String = ""
+    /// The Talk answer as it streams in, shown in the answer panel. Mirrors the
+    /// `livePartial` pattern deliberately: streaming deltas must NOT go through the
+    /// reducer — they'd flood it and make its transitions non-deterministic.
+    private(set) var answerText: String = ""
+    /// Which mode the current (or just-finished) utterance is in, for the overlay.
+    private(set) var mode: UtteranceMode = .dictate
 
     // Collaborators.
     private var machine = DictationStateMachine()
@@ -29,6 +35,8 @@ final class RecordingCoordinator {
     private let database: AppDatabase
     private let hotkeyMonitor: HotkeyMonitor
     private let timings = DictationTimings()
+    private let credentials = GoogleCredentials()
+    private let localTalk = LocalServerTalkProvider()
 
     var settings: AppSettings
     private var dictionary = PersonalDictionary()
@@ -40,6 +48,13 @@ final class RecordingCoordinator {
     private var currentFormatter: FormatterID = .deterministic
     private var recordingStartedAt: Date?
     private var currentDuration: TimeInterval = 0
+
+    // Talk state. The thread survives across questions while the answer panel is
+    // open, so follow-ups have history; `.endTalkThread` clears it.
+    private var talkThread: [TalkTurn] = []
+    private var talkContext: TalkContext = .none
+    private var contextTask: Task<Void, Never>?
+    private var answerTask: Task<Void, Never>?
 
     // Cancellable timers / tasks.
     private var minHoldTask: Task<Void, Never>?
@@ -106,6 +121,16 @@ final class RecordingCoordinator {
         case .optionUp: send(.optionUp)
         case .otherKeyWhileOptionHeld: send(.otherKeyWhileOptionHeld)
         case .escPressed: send(.escPressed)
+        case .talkModifierEngaged:
+            guard settings.talkEnabled else { return }
+            // Capture what the user is looking at NOW, while they're still speaking,
+            // so a screenshot + AX read never shows up in answer latency.
+            captureTalkContextIfNeeded()
+            send(.talkModifierEngaged)
+        case .copyAnswer:
+            SmartInserter.copyToClipboard(answerText)
+        case .insertAnswer:
+            insertAnswerAtCursor()
         }
     }
 
@@ -132,11 +157,15 @@ final class RecordingCoordinator {
 
     private func send(_ event: DictationEvent) {
         let effects = machine.handle(event)
+        mode = machine.mode
         let newState = machine.state
         if newState != state {
             let wasCommitted = state.isCommitted
             state = newState
             hotkeyMonitor.setActive(newState.isRecording || newState.isProcessing)
+            // While an answer is up, ⌘C / ⌘⏎ / Esc belong to the panel, not to
+            // whatever app is underneath.
+            hotkeyMonitor.setAnswerPanelPresented(newState.showsAnswerPanel)
             updateMediaPlayback(wasCommitted: wasCommitted, isCommitted: newState.isCommitted)
             // Once we leave the active window (idle/notice/blocked), drop the live
             // preview text so a stale transcript doesn't linger in the bubble, and
@@ -206,6 +235,19 @@ final class RecordingCoordinator {
             if settings.playSounds { NSSound(named: "Tink")?.play() }
         case .playStopSound:
             if settings.playSounds { NSSound(named: "Pop")?.play() }
+        case let .answer(question):
+            // Same reasoning as `.format`: transcription is done, nothing downstream
+            // needs the mic, so give other apps their audio back now.
+            media.resumeIfPaused()
+            currentRaw = question
+            answer(question)
+        case .hideAnswerPanel:
+            answerTask?.cancel(); answerTask = nil
+            answerText = ""
+        case .endTalkThread:
+            talkThread = []
+            talkContext = .none
+            contextTask?.cancel(); contextTask = nil
         }
     }
 
@@ -402,6 +444,133 @@ final class RecordingCoordinator {
                 Log.insert.error("Insert failed: \(error.localizedDescription, privacy: .public)")
                 self.send(.insertFailed)
             }
+        }
+    }
+
+    // MARK: - Talk
+
+    /// Read the ambient context — selection, app name, optional screenshot — once per
+    /// Talk thread. Follow-ups reuse it: the user is looking at the same thing, and
+    /// re-capturing on every question would re-send the image cost each time.
+    private func captureTalkContextIfNeeded() {
+        guard talkContext == .none, contextTask == nil else { return }
+        let wantsVision = settings.talkVisionEnabled
+        let appName = NSWorkspace.shared.frontmostApplication?.localizedName
+        let selected = AccessibilityContext.selectedText()
+
+        contextTask = Task { @MainActor [weak self] in
+            let shot = wantsVision ? await ScreenCapture.focusedWindowJPEG() : nil
+            guard let self, !Task.isCancelled else { return }
+            self.talkContext = TalkContext(selectedText: selected,
+                                           frontmostAppName: appName,
+                                           screenshotJPEG: shot)
+        }
+    }
+
+    private func answer(_ question: String) {
+        answerText = ""
+        // If the screenshot is still being captured, wait for it — but never let a
+        // stuck capture hold the answer hostage.
+        let pendingContext = contextTask
+        let thread = TalkPromptBuilder.thread(priorTurns: talkThread,
+                                              question: question,
+                                              context: talkContext)
+        let settings = self.settings
+        let credentials = self.credentials
+        let localTalk = self.localTalk
+
+        answerTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await pendingContext?.value
+            if Task.isCancelled { return }
+
+            // Re-read: the capture task may have landed since `thread` was built.
+            let context = self.talkContext
+            let request = TalkRequest(thread: thread,
+                                      context: context,
+                                      systemPrompt: TalkPromptBuilder.systemPrompt(for: context))
+            let config = settings.talkConfig
+
+            do {
+                let full = try await self.runProvider(request, config: config,
+                                                      credentials: credentials,
+                                                      local: localTalk)
+                if Task.isCancelled { return }
+                self.talkThread = thread + [TalkTurn(role: .assistant, text: full)]
+                self.answerText = full
+                self.send(.answerReady)
+            } catch {
+                if Task.isCancelled { return }
+                let reason = Self.describe(error)
+                Log.talk.error("Talk failed: \(reason, privacy: .public)")
+                self.send(.answerFailed(reason))
+            }
+        }
+    }
+
+    /// Run the configured provider, falling back to the local server when a cloud
+    /// provider is unusable — an unconfigured or offline Vertex shouldn't mean no
+    /// answer at all, and the local path keeps everything on the machine.
+    private func runProvider(_ request: TalkRequest,
+                             config: TalkConfig,
+                             credentials: GoogleCredentials,
+                             local: LocalServerTalkProvider) async throws -> String {
+        let onDelta: @Sendable (String) -> Void = { [weak self] delta in
+            Task { @MainActor in self?.appendAnswerDelta(delta) }
+        }
+
+        guard config.provider == .vertexGemini else {
+            return try await local.answer(request, config: config, onDelta: onDelta)
+        }
+
+        let vertex = VertexTalkProvider(credentials: credentials)
+        do {
+            return try await vertex.answer(request, config: config, onDelta: onDelta)
+        } catch let error as TalkError where error.isFallbackWorthy {
+            Log.talk.notice("Vertex unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
+            // Drop anything the failed attempt streamed so the two don't concatenate.
+            answerText = ""
+            var localConfig = config
+            localConfig.provider = .localServer
+            localConfig.model = settings.localServerModel
+            localConfig.endpoint = settings.localServerURL
+            return try await local.answer(request, config: localConfig, onDelta: onDelta)
+        }
+    }
+
+    /// Only surface deltas while this answer is still the live one; late callbacks
+    /// from a cancelled request are dropped.
+    private func appendAnswerDelta(_ delta: String) {
+        guard state.showsAnswerPanel else { return }
+        answerText += delta
+    }
+
+    /// Insert the answer at the cursor (⌘⏎), then dismiss the panel.
+    private func insertAnswerAtCursor() {
+        let text = answerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.inserter.insert(text)
+            } catch {
+                Log.insert.error("Answer insert failed: \(error.localizedDescription, privacy: .public)")
+                SmartInserter.copyToClipboard(text)
+            }
+            self.send(.escPressed)
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        guard let talk = error as? TalkError else { return error.localizedDescription }
+        switch talk {
+        case let .notConfigured(reason): return reason
+        case let .unreachable(reason): return "Can't reach the model: \(reason)"
+        case let .http(code, message):
+            return message.isEmpty ? "Model returned HTTP \(code)" : message
+        case .emptyResponse: return "The model returned nothing"
+        case .timedOut: return "The model timed out"
+        case let .underlying(reason): return reason
         }
     }
 

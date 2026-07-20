@@ -13,6 +13,10 @@ struct FlowBarView: View {
     var arming: Double = 0
     /// Rolling history of recent audio levels (oldest → newest) for the waveform.
     var levels: [Float] = []
+    /// Whether this utterance is a Talk question rather than dictation.
+    var mode: UtteranceMode = .dictate
+    /// The Talk answer, streaming in.
+    var answerText: String = ""
 
     /// Show the transcription bubble only when there's live text and we're still
     /// in an active utterance.
@@ -25,10 +29,58 @@ struct FlowBarView: View {
         VStack(spacing: 8) {
             pill
             if showsPartial { partialPill }
+            if state.showsAnswerPanel { answerPanel }
         }
         .foregroundStyle(.white)
         .font(.system(size: 12, weight: .medium, design: .monospaced))
         .animation(.easeInOut(duration: 0.15), value: showsPartial)
+        .animation(.easeInOut(duration: 0.18), value: state.showsAnswerPanel)
+    }
+
+    /// The Talk answer, below the pill. Appears with the first streamed token rather
+    /// than waiting for the full answer, so the wait reads as progress.
+    private var answerPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                Text(answerText.isEmpty ? "Thinking…" : answerText)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(answerText.isEmpty ? .white.opacity(0.5) : .white)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxHeight: 260)
+
+            HStack(spacing: 12) {
+                hint("⌘C", "Copy")
+                hint("⌘↩", "Insert")
+                hint("esc", "Close")
+                Spacer()
+                Text("hold ⌥ to ask again")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.black.opacity(0.88))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private func hint(_ key: String, _ action: String) -> some View {
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(.white.opacity(0.12)))
+            Text(action).font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
+        }
     }
 
     /// ONE pill container for every state, so its size tweens between states
@@ -137,12 +189,14 @@ struct FlowBarView: View {
         switch state {
         case .idle: return "Press (⌥) to speak"
         case .blockedSecureInput: return "Secure input active"
-        case .recording(.hold, _): return "Listening…"
+        case .recording(.hold, _): return mode == .talk ? "Asking…" : "Listening…"
         case .recording(.locked, _): return "Listening (hands-free)…"
         case .awaitingLockTap: return "Listening…"
         case .processing(.transcribing): return "Transcribing…"
         case .processing(.formatting): return "Formatting…"
+        case .processing(.answering): return "Thinking…"
         case .processing(.inserting): return "Inserting…"
+        case .answerPresented: return "Answer"
         case .notice(.noSpeech): return "No speech detected"
         case .notice(.error(let m)): return m
         case .notice(.copiedToClipboard(let r)): return r

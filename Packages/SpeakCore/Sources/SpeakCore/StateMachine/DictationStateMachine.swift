@@ -6,11 +6,24 @@ public enum RecordingMode: Equatable, Sendable {
     case locked
 }
 
+/// What this utterance is FOR. Ambient per-utterance state rather than part of
+/// `DictationState`: capture is identical either way, and the two only diverge once
+/// there's a transcript. Keeping it out of the state payload means every existing
+/// dictation transition stays untouched.
+public enum UtteranceMode: Equatable, Sendable {
+    /// Plain Option — transcribe, format, insert at the cursor.
+    case dictate
+    /// Control+Option — transcribe, ask a model, show the answer in a panel.
+    case talk
+}
+
 /// Which async stage of processing is in flight.
 public enum ProcessingPhase: Equatable, Sendable {
     case transcribing
     case formatting
     case inserting
+    /// Talk only: a provider is streaming an answer.
+    case answering
 }
 
 /// A transient, self-dismissing user notice.
@@ -32,6 +45,10 @@ public enum DictationState: Equatable, Sendable {
     /// hands-free mode. Audio keeps capturing during this window.
     case awaitingLockTap
     case processing(ProcessingPhase)
+    /// Talk only: an answer is on screen, waiting to be read. Persists until Esc or
+    /// the next utterance — deliberately NOT self-dismissing like `.notice`, since
+    /// the user needs however long it takes to read it.
+    case answerPresented
     case notice(Notice)
 
     public var isRecording: Bool {
@@ -57,10 +74,22 @@ public enum DictationState: Equatable, Sendable {
 
     /// Whether the Flow Bar overlay should be visible. Now shown during the
     /// provisional window too (as an "arming" progress bar), plus committed
-    /// recording, processing, and notices. Hidden only when idle/blocked.
+    /// recording, processing, notices, and a presented answer. Hidden only when
+    /// idle/blocked.
     public var showsOverlay: Bool {
         switch self {
-        case .recording, .processing, .notice: return true
+        case .recording, .processing, .notice, .answerPresented: return true
+        default: return false
+        }
+    }
+
+    /// Whether the answer panel should be on screen. True while an answer is
+    /// streaming in as well as once it's complete, so the panel appears with the
+    /// first token rather than popping in at the end.
+    public var showsAnswerPanel: Bool {
+        switch self {
+        case .answerPresented: return true
+        case .processing(.answering): return true
         default: return false
         }
     }
@@ -96,6 +125,14 @@ public enum DictationEvent: Equatable, Sendable {
     case insertFinished
     case insertFailed
     case secureInputChanged(Bool)
+    /// Control joined Option — this utterance is a Talk question, not dictation.
+    /// May arrive at `optionDown` (Control already held) or mid-capture (Control
+    /// pressed after Option). Sticky: releasing Control does not revert it.
+    case talkModifierEngaged
+    /// A provider finished streaming an answer. The answer text itself never passes
+    /// through the reducer — it streams onto the coordinator, like `livePartial`.
+    case answerReady
+    case answerFailed(String)
 }
 
 /// Side effects for the coordinator to execute. The reducer never performs I/O.
@@ -118,6 +155,14 @@ public enum Effect: Equatable, Sendable {
     case passThroughModifier
     case playStartSound
     case playStopSound
+    /// Ask the configured Talk provider, streaming the answer into the panel.
+    case answer(String)
+    /// Take the answer panel off screen (visual only — the thread survives, so a
+    /// follow-up question can continue the conversation).
+    case hideAnswerPanel
+    /// Discard the conversation thread. Emitted when a Talk session genuinely ends:
+    /// Esc, a failure, or the user switching back to plain dictation.
+    case endTalkThread
 }
 
 /// Tunable timings; timers themselves live in the coordinator.
@@ -154,10 +199,17 @@ public struct DictationTimings: Equatable, Sendable {
 public struct DictationStateMachine: Sendable {
     public private(set) var state: DictationState
     public private(set) var secureInputActive: Bool
+    /// What the in-flight (or just-finished) utterance is for. Set at capture start
+    /// and upgraded by `.talkModifierEngaged`; read when the transcript lands to
+    /// decide between the dictation and Talk paths.
+    public private(set) var mode: UtteranceMode
 
-    public init(state: DictationState = .idle, secureInputActive: Bool = false) {
+    public init(state: DictationState = .idle,
+                secureInputActive: Bool = false,
+                mode: UtteranceMode = .dictate) {
         self.state = state
         self.secureInputActive = secureInputActive
+        self.mode = mode
     }
 
     /// Apply an event, mutate `state`, and return the effects to run.
@@ -166,6 +218,13 @@ public struct DictationStateMachine: Sendable {
         // Secure-input changes are handled uniformly regardless of state.
         if case let .secureInputChanged(active) = event {
             return handleSecureInputChange(active)
+        }
+
+        // The Talk upgrade is likewise state-agnostic: it only matters that an
+        // utterance is in flight, not which phase it's in.
+        if case .talkModifierEngaged = event {
+            if state.isRecording { mode = .talk }
+            return []
         }
 
         switch state {
@@ -179,6 +238,8 @@ public struct DictationStateMachine: Sendable {
             return handleAwaitingLockTap(event)
         case let .processing(phase):
             return handleProcessing(phase: phase, event: event)
+        case .answerPresented:
+            return handleAnswerPresented(event)
         case .notice:
             return handleNotice(event)
         }
@@ -206,6 +267,8 @@ public struct DictationStateMachine: Sendable {
         case .optionDown:
             // Provisional: capture silently, no feedback yet — feedback waits for
             // the grace period so a quick Option+key combo stays a no-op.
+            // Every utterance starts as dictation; `.talkModifierEngaged` upgrades it.
+            mode = .dictate
             state = .recording(.hold, minHoldPassed: false)
             return [.startCapture, .scheduleMinHoldTimer]
         default:
@@ -293,6 +356,10 @@ public struct DictationStateMachine: Sendable {
         switch event {
         case .escPressed:
             state = .idle
+            // Cancelling mid-answer also tears down the panel and the conversation.
+            if phase == .answering {
+                return [.cancelWork, .hideAnswerPanel, .endTalkThread]
+            }
             return [.cancelWork]
 
         case let .captureFinished(hasSpeech) where phase == .transcribing:
@@ -309,12 +376,30 @@ public struct DictationStateMachine: Sendable {
                 state = .notice(.noSpeech)
                 return [.scheduleNoticeDismiss]
             }
-            state = .processing(.formatting)
-            return [.format(trimmed)]
+            // The one place the two modes diverge.
+            switch mode {
+            case .dictate:
+                state = .processing(.formatting)
+                // Returning to dictation ends any conversation that was open.
+                return [.format(trimmed), .endTalkThread]
+            case .talk:
+                state = .processing(.answering)
+                return [.answer(trimmed)]
+            }
 
         case .transcriptFailed where phase == .transcribing:
             state = .notice(.error("Transcription failed"))
-            return [.scheduleNoticeDismiss]
+            return [.scheduleNoticeDismiss, .endTalkThread]
+
+        case .answerReady where phase == .answering:
+            // Streaming already put the text on screen; just stop being "busy" and
+            // let the panel persist until Esc or the next utterance.
+            state = .answerPresented
+            return []
+
+        case let .answerFailed(reason) where phase == .answering:
+            state = .notice(.error(reason))
+            return [.hideAnswerPanel, .scheduleNoticeDismiss, .endTalkThread]
 
         case let .formatReady(text) where phase == .formatting:
             state = .processing(.inserting)
@@ -333,6 +418,27 @@ public struct DictationStateMachine: Sendable {
         }
     }
 
+    /// An answer is on screen. Esc closes it; a new press starts the next utterance,
+    /// which becomes a follow-up if `.talkModifierEngaged` arrives behind it.
+    private mutating func handleAnswerPresented(_ event: DictationEvent) -> [Effect] {
+        switch event {
+        case .escPressed:
+            state = secureInputActive ? .blockedSecureInput : .idle
+            return [.hideAnswerPanel, .endTalkThread]
+
+        case .optionDown where !secureInputActive:
+            // Deliberately does NOT end the thread: if Control is held this is a
+            // follow-up and the history matters. The dictate path drops the thread
+            // when the transcript lands instead.
+            mode = .dictate
+            state = .recording(.hold, minHoldPassed: false)
+            return [.hideAnswerPanel, .startCapture, .scheduleMinHoldTimer]
+
+        default:
+            return []
+        }
+    }
+
     private mutating func handleNotice(_ event: DictationEvent) -> [Effect] {
         switch event {
         case .noticeExpired:
@@ -340,6 +446,7 @@ public struct DictationStateMachine: Sendable {
             return []
         case .optionDown where !secureInputActive:
             // Start a new (provisional) dictation, dismissing the notice.
+            mode = .dictate
             state = .recording(.hold, minHoldPassed: false)
             return [.startCapture, .scheduleMinHoldTimer]
         default:

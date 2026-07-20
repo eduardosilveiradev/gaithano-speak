@@ -95,7 +95,9 @@ final class AppEnvironment {
             self.overlay.update(state: state, level: self.coordinator.audioLevel,
                                 partial: self.coordinator.livePartial,
                                 arming: self.coordinator.armingProgress,
-                                levels: self.coordinator.levelHistory)
+                                levels: self.coordinator.levelHistory,
+                                mode: self.coordinator.mode,
+                                answerText: self.coordinator.answerText)
         }
         secureWatcher.onChange = { [weak self] active in
             self?.coordinator.setSecureInput(active)
@@ -118,7 +120,9 @@ final class AppEnvironment {
                     overlay.update(state: coordinator.state, level: coordinator.audioLevel,
                                    partial: coordinator.livePartial,
                                    arming: coordinator.armingProgress,
-                                   levels: coordinator.levelHistory)
+                                   levels: coordinator.levelHistory,
+                                   mode: coordinator.mode,
+                                   answerText: coordinator.answerText)
                     try? await Task.sleep(nanoseconds: 16_666_666) // ~60 fps
                 } else {
                     try? await Task.sleep(nanoseconds: 100_000_000) // idle: light poll

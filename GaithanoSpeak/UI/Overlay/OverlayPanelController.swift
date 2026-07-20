@@ -45,24 +45,26 @@ final class OverlayPanelController {
     /// the bottom-center of the screen under the mouse (a full-screen click-through
     /// panel with the Flow Bar anchored near the bottom), rather than following the cursor.
     func update(state: DictationState, level: Float, partial: String = "", arming: Double = 0,
-                levels: [Float] = []) {
+                levels: [Float] = [], mode: UtteranceMode = .dictate, answerText: String = "") {
         let frame = activeScreenFrame()
         if panel.frame != frame { panel.setFrame(frame, display: true) }
 
         hostingView.rootView = AnyView(
-            FlowBarView(state: state, level: level, partial: partial, arming: arming, levels: levels)
+            FlowBarView(state: state, level: level, partial: partial, arming: arming,
+                        levels: levels, mode: mode, answerText: answerText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, 96)
         )
 
         if state.showsOverlay {
             cancelHide()
-            if state.isRecording || state.isProcessing {
-                // Recording (incl. hands-free lock) AND active processing
-                // (transcribing / formatting / inserting) never time out — a slow
-                // reasoning model can take well over 10s to format, and the pill must
-                // stay up the whole time. Keep the clock fresh so only a lingering
-                // *notice* pill afterward is subject to the cap.
+            if state.isRecording || state.isProcessing || state.showsAnswerPanel {
+                // Recording (incl. hands-free lock), active processing (transcribing /
+                // formatting / inserting), and a presented answer never time out — a
+                // slow reasoning model can take well over 10s to format, and an answer
+                // stays up until the user dismisses it, however long they read for.
+                // Keep the clock fresh so only a lingering *notice* pill afterward is
+                // subject to the cap.
                 visibleStart = Date()
                 didTimeOut = false
                 if !panel.isVisible { panel.orderFrontRegardless() }

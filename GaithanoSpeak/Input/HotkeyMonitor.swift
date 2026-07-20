@@ -9,6 +9,12 @@ enum HotkeyEvent: Sendable {
     case optionUp
     case otherKeyWhileOptionHeld
     case escPressed
+    /// Control joined the dictation key — upgrade this utterance to Talk.
+    case talkModifierEngaged
+    /// ⌘C while an answer is on screen.
+    case copyAnswer
+    /// ⌘⏎ while an answer is on screen: insert it at the cursor.
+    case insertAnswer
 }
 
 /// Watches for the push-to-talk key system-wide using an active `CGEventTap` on a
@@ -27,6 +33,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var choice: HotkeyChoice = .rightOption
     private var optionHeld = false
     private var active = false   // recording or processing — controls Esc consumption
+    private var panelPresented = false  // an answer is on screen — enables ⌘C / ⌘⏎ / Esc
 
     /// Called on the main actor for each hotkey event.
     var onEvent: (@Sendable (HotkeyEvent) -> Void)?
@@ -37,6 +44,8 @@ final class HotkeyMonitor: @unchecked Sendable {
     private static let kRightControl: Int64 = 62
     private static let kFn: Int64 = 63
     private static let kEsc: Int64 = 53
+    private static let kC: Int64 = 8
+    private static let kReturn: Int64 = 36
 
     func updateChoice(_ choice: HotkeyChoice) {
         lock.lock(); self.choice = choice; lock.unlock()
@@ -45,6 +54,12 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// Whether a dictation is active (set by the coordinator) — gates Esc consumption.
     func setActive(_ active: Bool) {
         lock.lock(); self.active = active; lock.unlock()
+    }
+
+    /// Whether a Talk answer is on screen. While it is, we consume ⌘C and ⌘⏎ so they
+    /// act on the answer rather than on whatever app is frontmost.
+    func setAnswerPanelPresented(_ presented: Bool) {
+        lock.lock(); self.panelPresented = presented; lock.unlock()
     }
 
     func start() {
@@ -118,15 +133,29 @@ final class HotkeyMonitor: @unchecked Sendable {
         let choice = self.choice
         let wasHeld = self.optionHeld
         let isActive = self.active
+        let hasPanel = self.panelPresented
         lock.unlock()
 
         if type == .flagsChanged {
+            let hasControl = event.flags.contains(.maskControl)
+            // Control arriving while the dictation key is already down upgrades the
+            // in-flight utterance to Talk. This lands here rather than in
+            // `matchesChoice` because Control is never itself a dictation key — and
+            // because a modifier is a `flagsChanged`, not a `keyDown`, so it can't
+            // trip the `otherKeyWhileOptionHeld` passthrough below.
+            if wasHeld && hasControl {
+                emit(.talkModifierEngaged)
+            }
+
             let isOurKey = matchesChoice(keyCode: keyCode, choice: choice)
             guard isOurKey else { return false }
             let nowDown = isHeld(flags: event.flags, choice: choice)
             if nowDown && !wasHeld {
                 lock.lock(); optionHeld = true; lock.unlock()
                 emit(.optionDown)
+                // Control-then-Option ordering: the upgrade check above only fires
+                // when Option was already down, so cover the reverse order here.
+                if hasControl { emit(.talkModifierEngaged) }
             } else if !nowDown && wasHeld {
                 lock.lock(); optionHeld = false; lock.unlock()
                 emit(.optionUp)
@@ -136,11 +165,27 @@ final class HotkeyMonitor: @unchecked Sendable {
 
         if type == .keyDown {
             if keyCode == Self.kEsc {
-                if isActive {
+                if isActive || hasPanel {
                     emit(.escPressed)
-                    return true // consume Esc while active
+                    return true // consume Esc while active or showing an answer
                 }
                 return false
+            }
+            // Answer-panel shortcuts. Consumed so they don't also reach the app
+            // underneath — ⌘C especially would otherwise clobber the user's clipboard
+            // with whatever that app had selected.
+            if hasPanel {
+                let flags = event.flags
+                if keyCode == Self.kC && flags.contains(.maskCommand) {
+                    emit(.copyAnswer)
+                    return true
+                }
+                // ⌘⏎ rather than ⌥⏎: Option is the dictation key, so holding it would
+                // start a new recording before Return ever arrived.
+                if keyCode == Self.kReturn && flags.contains(.maskCommand) {
+                    emit(.insertAnswer)
+                    return true
+                }
             }
             // Any other key while our Option is physically held → modifier combo.
             if wasHeld {
@@ -152,14 +197,9 @@ final class HotkeyMonitor: @unchecked Sendable {
         return false
     }
 
-    /// Whether this `flagsChanged` came from a key that participates in the chosen
-    /// gesture. For the ⌃⌥ combo BOTH modifiers qualify, so releasing either one
-    /// produces an event we can turn into `optionUp`.
+    /// Whether this `flagsChanged` came from the key that arms dictation.
     private func matchesChoice(keyCode: Int64, choice: HotkeyChoice) -> Bool {
         switch choice {
-        case .controlOption:
-            return keyCode == Self.kLeftOption || keyCode == Self.kRightOption
-                || keyCode == Self.kLeftControl || keyCode == Self.kRightControl
         case .eitherOption: return keyCode == Self.kLeftOption || keyCode == Self.kRightOption
         case .leftOption: return keyCode == Self.kLeftOption
         case .rightOption: return keyCode == Self.kRightOption
@@ -167,12 +207,9 @@ final class HotkeyMonitor: @unchecked Sendable {
         }
     }
 
-    /// Whether the gesture's modifier(s) are currently down, per the event flags.
-    /// The ⌃⌥ combo requires both simultaneously — pressing them in either order
-    /// arms on the second one, and releasing either disarms.
+    /// Whether the gesture's modifier is currently down, per the event flags.
     private func isHeld(flags: CGEventFlags, choice: HotkeyChoice) -> Bool {
         switch choice {
-        case .controlOption: return flags.contains(.maskControl) && flags.contains(.maskAlternate)
         case .fn: return flags.contains(.maskSecondaryFn)
         case .eitherOption, .leftOption, .rightOption: return flags.contains(.maskAlternate)
         }

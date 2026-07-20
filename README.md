@@ -2,11 +2,28 @@
 
 Local-first, system-wide voice dictation for macOS — a Wispr Flow–style app that
 runs entirely on your Mac. Hold a key anywhere, speak, release, and polished text
-is typed into whatever app you're in. No cloud, no subscription.
+is typed into whatever app you're in. No subscription.
 
 - **On-device STT** — NVIDIA Parakeet TDT v3 via [FluidAudio](https://github.com/FluidInference/FluidAudio) (CoreML/ANE).
 - **On-device formatting** — Apple Intelligence (Foundation Models) cleans fillers, punctuation, and casing; falls back to deterministic cleanup when unavailable.
-- **Private by design** — audio and text never leave the machine.
+- **Talk mode** — hold ⌃⌥ instead of ⌥ and your words go to a model for a quick answer, shown in a panel rather than typed. ⌘C copies it, ⌘↩ inserts it, esc closes.
+- **Private by default** — dictation is entirely on-device: audio and text never leave the machine.
+
+### What Talk sends
+
+Talk is the one feature that can leave your Mac, so it's worth being precise:
+
+- **Dictation never leaves the machine.** Nothing below applies unless you hold Control.
+- With the default **Vertex AI** provider, a Talk question sends your transcribed
+  words, any text you had selected, and the name of the frontmost app to Google.
+- **Vision is off by default.** Turning it on additionally uploads a screenshot of
+  your focused window with each new question, and needs the Screen Recording
+  permission.
+- Choosing the **local server** provider (LM Studio / Ollama) keeps Talk on-device
+  too. It's also the automatic fallback when Vertex is unconfigured or unreachable.
+
+Vertex uses your existing gcloud credentials (`gcloud auth application-default
+login`) — there's no API key to paste and no account with us.
 
 ## Requirements
 - Apple Silicon Mac, macOS 26+

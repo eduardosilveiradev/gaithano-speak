@@ -28,7 +28,9 @@ struct DictationStateMachineTests {
 
         effects = m.handle(.transcriptReady("hello world this is a test"))
         #expect(m.state == .processing(.formatting))
-        #expect(effects == [.format("hello world this is a test")])
+        // `.endTalkThread` rides along on every dictate-mode transcript: it is how a
+        // Talk thread gets dropped when the user's next utterance is plain dictation.
+        #expect(effects == [.format("hello world this is a test"), .endTalkThread])
 
         effects = m.handle(.formatReady("Hello world, this is a test."))
         #expect(m.state == .processing(.inserting))
@@ -231,7 +233,7 @@ struct DictationStateMachineTests {
         m.handle(.optionDown); m.handle(.minHoldElapsed); m.handle(.optionUp)
         m.handle(.captureFinished(hasSpeech: true))
         let fail = m.handle(.transcriptFailed)
-        #expect(fail == [.scheduleNoticeDismiss])
+        #expect(fail == [.scheduleNoticeDismiss, .endTalkThread])
         if case .notice(.error) = m.state {} else {
             Issue.record("expected an error notice, got \(m.state)")
         }
