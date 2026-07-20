@@ -472,7 +472,7 @@ final class RecordingCoordinator {
         let selected = AccessibilityContext.selectedText()
 
         contextTask = Task { @MainActor [weak self] in
-            let shot = wantsVision ? await ScreenCapture.focusedWindowJPEG() : nil
+            let shot = wantsVision ? await ScreenCapture.screenJPEG() : nil
             guard let self, !Task.isCancelled else { return }
             self.talkContext = TalkContext(selectedText: selected,
                                            frontmostAppName: appName,

@@ -17,8 +17,8 @@ Talk is the one feature that can leave your Mac, so it's worth being precise:
 - With the default **Vertex AI** provider, a Talk question sends your transcribed
   words, any text you had selected, and the name of the frontmost app to Google.
 - **Vision is off by default.** Turning it on additionally uploads a screenshot of
-  your focused window with each new question, and needs the Screen Recording
-  permission.
+  your whole screen — every window visible on it, not just the one you're working
+  in — with each new question, and needs the Screen Recording permission.
 - Choosing the **local server** provider (LM Studio / Ollama) keeps Talk on-device
   too. It's also the automatic fallback when Vertex is unconfigured or unreachable.
 

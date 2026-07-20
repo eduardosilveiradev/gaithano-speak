@@ -4,54 +4,62 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 import SpeakCore
 
-/// Grabs a JPEG of the focused window for Talk's vision context.
+/// Grabs a JPEG of the screen for Talk's vision context.
 ///
 /// Every failure path returns nil rather than throwing: a missing permission or an
-/// app with no capturable window should quietly degrade Talk to text-only, never
-/// break the answer.
+/// unreadable display should quietly degrade Talk to text-only, never break the
+/// answer.
 enum ScreenCapture {
-    /// Long edge to downscale to. A 512px capture measured ~1090 prompt tokens
-    /// against Gemini, so 1024 buys real legibility for UI text at a few thousand
-    /// tokens — worth it, since reading the screen is the whole point.
-    static let maxDimension: CGFloat = 1024
+    /// Long edge to downscale to. Higher than it was when this captured a single
+    /// window: a whole display holds far more, so the same budget would shrink UI
+    /// text past legibility. Costs a few thousand prompt tokens, which is the point
+    /// of sending an image at all.
+    static let maxDimension: CGFloat = 1536
 
     /// JPEG quality. Screenshots are mostly flat UI, so this compresses well and
     /// the artifacts that remain don't hurt text legibility.
     static let compressionQuality: CGFloat = 0.7
 
-    /// Capture the frontmost app's main window, or nil if we can't.
+    /// Capture the whole active display, or nil if we can't.
+    ///
+    /// Deliberately the *display* and not the focused window: picking a window meant
+    /// asking who was frontmost, and with the Flow Bar up that could be us — so Talk
+    /// ended up looking at its own overlay. A display capture has no such ambiguity,
+    /// and it also lets the model see the thing next to the window you're in, which
+    /// is usually what a question is about.
     ///
     /// Called at recording start rather than at question time, so the capture
     /// overlaps with the user still speaking instead of adding to answer latency.
-    static func focusedWindowJPEG() async -> Data? {
+    static func screenJPEG() async -> Data? {
         guard CGPreflightScreenCaptureAccess() else {
             Log.talk.info("Screen Recording permission not granted; Talk stays text-only")
             return nil
         }
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true)
 
-            // Largest on-screen window belonging to the frontmost app: the main
-            // document window, rather than a palette or an offscreen helper.
-            let candidate = content.windows
-                .filter { $0.owningApplication?.processID == frontmost.processIdentifier }
-                .filter { $0.frame.width > 100 && $0.frame.height > 100 }
-                .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
-
-            guard let window = candidate else {
-                Log.talk.info("No capturable window for the frontmost app")
+            guard let display = activeDisplay(in: content) else {
+                Log.talk.info("No capturable display")
                 return nil
             }
 
-            let filter = SCContentFilter(desktopIndependentWindow: window)
+            // Cut ourselves out. The Flow Bar — and, on a follow-up, the answer panel
+            // — are on screen at capture time, so without this the model spends part
+            // of its attention reading its own previous answer back to itself.
+            let ourselves = content.applications.filter {
+                $0.bundleIdentifier == Bundle.main.bundleIdentifier
+            }
+            let filter = SCContentFilter(display: display,
+                                         excludingApplications: ourselves,
+                                         exceptingWindows: [])
+
             let config = SCStreamConfiguration()
-            // Capture at the window's own size, then downscale once below — letting
+            // Capture at the display's own size, then downscale once below — letting
             // ScreenCaptureKit scale directly tends to blur small UI text.
-            config.width = Int(window.frame.width)
-            config.height = Int(window.frame.height)
+            config.width = display.width
+            config.height = display.height
             config.showsCursor = false
             config.captureResolution = .best
 
@@ -62,6 +70,20 @@ enum ScreenCapture {
             Log.talk.error("Screen capture failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    /// The display under the pointer — the one the user is actually looking at, and
+    /// the same rule the overlay uses to pick a screen. Falls back to the first
+    /// available so a multi-monitor edge case still returns something.
+    private static func activeDisplay(in content: SCShareableContent) -> SCDisplay? {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        if let id = screen?.deviceDescription[key] as? CGDirectDisplayID,
+           let match = content.displays.first(where: { $0.displayID == id }) {
+            return match
+        }
+        return content.displays.first
     }
 
     /// Downscale to `maxDimension` on the long edge and JPEG-encode.
@@ -93,7 +115,7 @@ enum ScreenCapture {
         ] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
 
-        Log.talk.info("Captured window screenshot (\(data.length / 1024) KB)")
+        Log.talk.info("Captured screen screenshot (\(data.length / 1024) KB)")
         return data as Data
     }
 }

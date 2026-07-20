@@ -67,7 +67,7 @@ struct SettingsView: View {
                     if environment.settings.talkProvider == .vertexGemini {
                         vertexFields
                     }
-                    Toggle("Send a screenshot of the focused window", isOn: bind(\.talkVisionEnabled))
+                    Toggle("Send a screenshot of your screen", isOn: bind(\.talkVisionEnabled))
                         .onChange(of: environment.settings.talkVisionEnabled) { _, enabled in
                             // Ask up front rather than at the moment of the first
                             // question — the prompt would otherwise interrupt speech.
@@ -131,7 +131,7 @@ struct SettingsView: View {
         let destination = environment.settings.talkProvider.isCloud
             ? "uploaded to Google"
             : "sent to your local server"
-        return "An image of whatever window you're in is \(destination) with each new question. Requires the Screen Recording permission."
+        return "An image of your whole screen — every window on it, not just the one you're in — is \(destination) with each new question. Requires the Screen Recording permission."
     }
 
     @ViewBuilder private var localServerFields: some View {
