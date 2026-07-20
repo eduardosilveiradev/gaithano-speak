@@ -105,8 +105,10 @@ final class AgentRunner {
             }
             if Task.isCancelled { return }
 
-            if let call = try? JSONSerialization.jsonObject(with: turn.rawCall) {
-                contents.append(["role": "model", "parts": [["functionCall": call]]])
+            // Echoed back exactly as received, thought signatures and all — see
+            // `AgentModel.Turn.rawParts`.
+            if let parts = try? JSONSerialization.jsonObject(with: turn.rawParts) as? [Any] {
+                contents.append(["role": "model", "parts": parts])
             }
 
             let risk = policy.risk(of: turn.action,

@@ -159,14 +159,14 @@ final class HotkeyMonitor: @unchecked Sendable {
             // `matchesChoice` because Control is never itself a dictation key — and
             // because a modifier is a `flagsChanged`, not a `keyDown`, so it can't
             // trip the `otherKeyWhileOptionHeld` passthrough below.
-            let hasShift = event.flags.contains(.maskShift)
             if wasHeld && hasControl {
-                // Both, in this order: the reducer refuses to demote an utterance that
-                // already reached `.agent`, so a stray Talk event behind this one is
-                // harmless, while emitting only the agent event would leave a
-                // Shift-released-early gesture with no mode at all.
+                // Both, in this order. Control alone now means the agent, so the second
+                // event is unconditional — but the Talk event still has to come first,
+                // and first: the coordinator drops the agent event when the feature is
+                // off, and the reducer refuses to demote an utterance that already
+                // reached `.agent`, so the pair resolves correctly either way.
                 emit(.talkModifierEngaged)
-                if hasShift { emit(.agentModifierEngaged) }
+                emit(.agentModifierEngaged)
             }
 
             let isOurKey = matchesChoice(keyCode: keyCode, choice: choice)
@@ -179,7 +179,7 @@ final class HotkeyMonitor: @unchecked Sendable {
                 // when Option was already down, so cover the reverse order here.
                 if hasControl {
                     emit(.talkModifierEngaged)
-                    if hasShift { emit(.agentModifierEngaged) }
+                    emit(.agentModifierEngaged)
                 }
             } else if !nowDown && wasHeld {
                 lock.lock(); optionHeld = false; lock.unlock()

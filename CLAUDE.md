@@ -74,9 +74,13 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 **Settings decoding is lenient.** `AppSettings.init(from:)` decodes every key with a default fallback so adding a setting never wipes saved preferences. Add new fields to both the memberwise init and the custom decoder.
 
-### The agent (⌃⇧⌥)
+### The agent (⌃⌥, when enabled)
 
-A third `UtteranceMode` alongside `.dictate` and `.talk`: same capture, but the model gets tools and drives the machine. `AgentRunner` loops screenshot → `AgentModel` → `AgentRiskPolicy` → maybe confirm → `AgentExecutor` → screenshot. Off by default (`settings.agentEnabled`), and gated behind `talkEnabled` too — reading the screen and acting on it are separate consents.
+A third `UtteranceMode` alongside `.dictate` and `.talk`: same capture, but the model gets tools and drives the machine. `AgentRunner` loops screenshot → `AgentModel` → `AgentRiskPolicy` → maybe confirm → `AgentExecutor` → screenshot. Gated on `settings.agentEnabled` *and* `talkEnabled`; both default on.
+
+**The agent has no gesture of its own.** `HotkeyMonitor` emits `.talkModifierEngaged` then `.agentModifierEngaged` for the same ⌃⌥ chord, unconditionally; which one wins is decided by the `settings.agentEnabled` guard in the coordinator, and the reducer's refusal to demote `.agent` back to `.talk` is what makes the ordered pair resolve. So the settings toggle *is* the mode switch — with the agent on there is no way to ask a plain question, and with it off ⌃⌥ answers as before. Shift is no longer read; don't reintroduce it as a discriminator without fixing the demotion problem (a user who adds Shift after Option is already down would emit the events in the wrong order).
+
+**The agent ignores `talkVisionEnabled` and always screenshots** — it can't act on a screen it can't see. Settings says so explicitly when that toggle is off rather than letting it appear to cover both gestures.
 
 **The risk policy is the safety boundary, and it lives in SpeakCore.** `AgentRiskPolicy.risk(of:inApp:secureInputActive:)` is pure and unit-tested precisely so it can't be bypassed. `AgentExecutor` contains no approval logic at all — by the time it's called, the decision is already made. Don't add a "just this once" path that skips the classification.
 

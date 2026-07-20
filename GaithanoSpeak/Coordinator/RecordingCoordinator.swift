@@ -158,7 +158,8 @@ final class RecordingCoordinator {
             send(.talkModifierEngaged)
         case .agentModifierEngaged:
             // Requires both consents: Talk off means the gesture never got as far as
-            // a model, and agent off means it stays a question rather than an action.
+            // a model, and agent off means it stays a question rather than an action —
+            // which is the only way to reach plain Talk now that ⌃⌥ arms the agent.
             guard settings.talkEnabled, settings.agentEnabled else { return }
             send(.agentModifierEngaged)
         case .agentConfirm:
@@ -586,7 +587,7 @@ final class RecordingCoordinator {
 
         answerText = ""
         streamStarted = true   // the panel is showing steps, not a stream to swap in
-        runner.start(task: task)
+        runner.start(task: task, autoConfirm: settings.agentAutoConfirm)
     }
 
     /// Idempotent, and safe to call when nothing is running — every panel-dismissal

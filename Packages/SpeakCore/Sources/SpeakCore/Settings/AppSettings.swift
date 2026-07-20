@@ -50,10 +50,19 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var talkEnabled: Bool
     /// Whether adding Shift lets the model click and type on the user's behalf.
     ///
-    /// Off by default, and deliberately not implied by `talkEnabled`: reading the
-    /// screen and acting on it are different consents, and the second one can't be
-    /// undone by closing a panel.
+    /// On by default: this is a personal, directly-distributed tool whose owner asked
+    /// for the gesture to be armed, and leaving it off made ⌃⇧⌥ silently behave like
+    /// ⌃⌥ — a worse failure than the one the default was guarding against, since the
+    /// user can't tell which mode they're in. What actually keeps this safe is
+    /// `AgentRiskPolicy`, not the default, and that is unchanged.
     public var agentEnabled: Bool
+    /// Start every agent run already in auto mode, so risky steps never stop to ask.
+    ///
+    /// Off by default and kept separate from `agentEnabled` because it removes the
+    /// feature's only interactive rail. `.blocked` actions (typing while a password
+    /// field has focus) are still refused — `AgentSession` checks those ahead of
+    /// `autoConfirm`, and that ordering is not negotiable.
+    public var agentAutoConfirm: Bool
     public var talkProvider: TalkProviderID
     /// Model id for the Talk provider. Vertex default is `gemini-3.5-flash`.
     public var talkModel: String
@@ -81,7 +90,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
                 talkEnabled: Bool = true,
-                agentEnabled: Bool = false,
+                agentEnabled: Bool = true,
+                agentAutoConfirm: Bool = false,
                 talkProvider: TalkProviderID = .vertexGemini,
                 talkModel: String = "gemini-3.5-flash",
                 vertexProjectID: String = "",
@@ -101,6 +111,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.localServerModel = localServerModel
         self.talkEnabled = talkEnabled
         self.agentEnabled = agentEnabled
+        self.agentAutoConfirm = agentAutoConfirm
         self.talkProvider = talkProvider
         self.talkModel = talkModel
         self.vertexProjectID = vertexProjectID
@@ -133,6 +144,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
         agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
+        agentAutoConfirm = try c.decodeIfPresent(Bool.self, forKey: .agentAutoConfirm) ?? d.agentAutoConfirm
         talkProvider = (try? c.decodeIfPresent(TalkProviderID.self, forKey: .talkProvider)) ?? d.talkProvider
         talkModel = try c.decodeIfPresent(String.self, forKey: .talkModel) ?? d.talkModel
         vertexProjectID = try c.decodeIfPresent(String.self, forKey: .vertexProjectID) ?? d.vertexProjectID

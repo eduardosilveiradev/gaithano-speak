@@ -34,13 +34,18 @@ struct AgentModel: Sendable {
     /// to history verbatim. Gemini rejects a `functionResponse` that doesn't match a
     /// preceding `functionCall`, so the round trip has to carry the original.
     ///
-    /// `rawCall` is JSON bytes rather than a dictionary because this crosses an
-    /// isolation boundary — `[String: Any]` is not `Sendable`, and marking it as such
-    /// would be a lie about a value the network layer really does hand off. Re-parsing
-    /// costs microseconds next to the request that produced it.
+    /// `rawParts` is the model content's ENTIRE parts array, not just the function
+    /// call. Gemini 3.5 hangs a `thoughtSignature` on the part alongside the call, and
+    /// rejects a follow-up turn whose history dropped it ("Function call is missing a
+    /// thought_signature"). Reconstructing a part from its pieces loses whatever
+    /// fields we didn't think to copy, so the whole thing is echoed back untouched.
+    ///
+    /// JSON bytes rather than a dictionary because this crosses an isolation boundary
+    /// — `[String: Any]` is not `Sendable`, and marking it as such would be a lie
+    /// about a value the network layer really does hand off.
     struct Turn: Sendable {
         var action: AgentAction
-        var rawCall: Data
+        var rawParts: Data
         var toolName: String
     }
 
@@ -223,7 +228,7 @@ struct AgentModel: Sendable {
                   let name = call["name"] as? String else { continue }
             let args = call["args"] as? [String: Any] ?? [:]
             return Turn(action: try action(name: name, args: args),
-                        rawCall: try JSONSerialization.data(withJSONObject: call),
+                        rawParts: try JSONSerialization.data(withJSONObject: parts),
                         toolName: name)
         }
 

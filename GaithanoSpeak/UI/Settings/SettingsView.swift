@@ -96,8 +96,20 @@ struct SettingsView: View {
                                 needsScreenRecording = true
                             }
                         }
-                    Text("⌃⇧⌥ instead of ⌃⌥: the model reads your screen and can click and type for you. It runs on its own for ordinary steps, and stops for your approval before anything that sends, deletes, buys, or touches a terminal or password manager — ↩ allows one step, A allows the rest of that run, esc stops it. Anything written on your screen is treated as text to read, never as instructions to follow.")
+                    Text("On, ⌃⌥ runs the agent rather than answering: the model reads your screen and can click and type for you. Turn this off to go back to plain answers. It runs on its own for ordinary steps, and stops for your approval before anything that sends, deletes, buys, or touches a terminal or password manager — ↩ allows one step, A allows the rest of that run, esc stops it. Anything written on your screen is treated as text to read, never as instructions to follow.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Always start in auto mode", isOn: bind(\.agentAutoConfirm))
+                    Text("Skips every approval prompt from the first step, so the model sends, deletes, and buys without stopping to ask. Typing while a password field has focus is still refused — that rail isn't a prompt. esc still stops a run.")
+                        .font(.caption)
+                        .foregroundStyle(environment.settings.agentAutoConfirm ? .orange : .secondary)
+
+                    if !environment.settings.talkVisionEnabled {
+                        // The agent cannot work blind, so it screenshots whatever the
+                        // setting above says. Saying so is better than a toggle that
+                        // quietly doesn't hold for one of the two gestures.
+                        Text("Note: this sends screenshots every step even with the setting above off — the model can't act on a screen it can't see. Turn this off to stop it.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
 
