@@ -21,6 +21,14 @@ final class RecordingCoordinator {
     private(set) var answerText: String = ""
     /// Which mode the current (or just-finished) utterance is in, for the overlay.
     private(set) var mode: UtteranceMode = .dictate
+    /// Whether the overlay should draw the answer panel. Mirrors the reducer's
+    /// `hasAnswer` rather than `state.showsAnswerPanel`, because during a follow-up
+    /// the state is `.recording` while the panel must stay on screen.
+    private(set) var showsAnswerPanel = false
+    /// Whether the in-flight answer has produced its first token. Until it does, the
+    /// previous answer stays on screen — a follow-up shouldn't blank the panel it's
+    /// asking about, and the first delta is a natural moment to swap.
+    private var streamStarted = false
 
     // Collaborators.
     private var machine = DictationStateMachine()
@@ -158,6 +166,7 @@ final class RecordingCoordinator {
     private func send(_ event: DictationEvent) {
         let effects = machine.handle(event)
         mode = machine.mode
+        showsAnswerPanel = machine.hasAnswer
         let newState = machine.state
         if newState != state {
             let wasCommitted = state.isCommitted
@@ -165,7 +174,7 @@ final class RecordingCoordinator {
             hotkeyMonitor.setActive(newState.isRecording || newState.isProcessing)
             // While an answer is up, ⌘C / ⌘⏎ / Esc belong to the panel, not to
             // whatever app is underneath.
-            hotkeyMonitor.setAnswerPanelPresented(newState.showsAnswerPanel)
+            hotkeyMonitor.setAnswerPanelPresented(machine.hasAnswer)
             updateMediaPlayback(wasCommitted: wasCommitted, isCommitted: newState.isCommitted)
             // Once we leave the active window (idle/notice/blocked), drop the live
             // preview text so a stale transcript doesn't linger in the bubble, and
@@ -244,6 +253,7 @@ final class RecordingCoordinator {
         case .hideAnswerPanel:
             answerTask?.cancel(); answerTask = nil
             answerText = ""
+            streamStarted = false
         case .endTalkThread:
             talkThread = []
             talkContext = .none
@@ -468,7 +478,9 @@ final class RecordingCoordinator {
     }
 
     private func answer(_ question: String) {
-        answerText = ""
+        // `answerText` is deliberately left alone — a follow-up keeps the previous
+        // answer visible until its own first token arrives.
+        streamStarted = false
         // If the screenshot is still being captured, wait for it — but never let a
         // stuck capture hold the answer hostage.
         let pendingContext = contextTask
@@ -529,7 +541,7 @@ final class RecordingCoordinator {
         } catch let error as TalkError where error.isFallbackWorthy {
             Log.talk.notice("Vertex unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
             // Drop anything the failed attempt streamed so the two don't concatenate.
-            answerText = ""
+            streamStarted = false
             var localConfig = config
             localConfig.provider = .localServer
             localConfig.model = settings.localServerModel
@@ -541,7 +553,10 @@ final class RecordingCoordinator {
     /// Only surface deltas while this answer is still the live one; late callbacks
     /// from a cancelled request are dropped.
     private func appendAnswerDelta(_ delta: String) {
-        guard state.showsAnswerPanel else { return }
+        guard case .processing(.answering) = state else { return }
+        // The first token of a new answer replaces the old one; everything after
+        // appends to it.
+        if !streamStarted { answerText = ""; streamStarted = true }
         answerText += delta
     }
 

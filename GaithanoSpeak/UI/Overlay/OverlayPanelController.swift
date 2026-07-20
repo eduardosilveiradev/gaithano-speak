@@ -45,20 +45,22 @@ final class OverlayPanelController {
     /// the bottom-center of the screen under the mouse (a full-screen click-through
     /// panel with the Flow Bar anchored near the bottom), rather than following the cursor.
     func update(state: DictationState, level: Float, partial: String = "", arming: Double = 0,
-                levels: [Float] = [], mode: UtteranceMode = .dictate, answerText: String = "") {
+                levels: [Float] = [], mode: UtteranceMode = .dictate, answerText: String = "",
+                showsAnswerPanel: Bool = false) {
         let frame = activeScreenFrame()
         if panel.frame != frame { panel.setFrame(frame, display: true) }
 
         hostingView.rootView = AnyView(
             FlowBarView(state: state, level: level, partial: partial, arming: arming,
-                        levels: levels, mode: mode, answerText: answerText)
+                        levels: levels, mode: mode, answerText: answerText,
+                        showsAnswerPanel: showsAnswerPanel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, 96)
         )
 
         if state.showsOverlay {
             cancelHide()
-            if state.isRecording || state.isProcessing || state.showsAnswerPanel {
+            if state.isRecording || state.isProcessing || showsAnswerPanel {
                 // Recording (incl. hands-free lock), active processing (transcribing /
                 // formatting / inserting), and a presented answer never time out — a
                 // slow reasoning model can take well over 10s to format, and an answer

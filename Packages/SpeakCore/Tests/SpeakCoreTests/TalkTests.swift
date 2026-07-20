@@ -33,11 +33,11 @@ struct TalkModeTests {
         #expect(effects == [.answer("what does this error mean")])
         #expect(m.state == .processing(.answering))
         // The panel opens with the first token, not after the full answer.
-        #expect(m.state.showsAnswerPanel)
+        #expect(m.hasAnswer)
 
         m.handle(.answerReady)
         #expect(m.state == .answerPresented)
-        #expect(m.state.showsAnswerPanel)
+        #expect(m.hasAnswer)
         #expect(m.state.showsOverlay)
     }
 
@@ -82,14 +82,17 @@ struct TalkModeTests {
 
 @Suite("Talk threading")
 struct TalkThreadingTests {
-    /// A follow-up keeps the conversation: the panel-open press must NOT tear the
-    /// thread down, because at that moment we don't yet know if Control is coming.
-    @Test("Asking again from the panel preserves the thread")
+    /// A follow-up keeps the conversation *and* the panel: the panel-open press must
+    /// tear neither down, because at that moment we don't yet know if Control is
+    /// coming — and if it is, the user is asking about what's on screen.
+    @Test("Asking again from the panel preserves the thread and the answer")
     func followUpKeepsThread() {
         var m = presentedAnswer()
         let effects = m.handle(.optionDown)
-        #expect(effects == [.hideAnswerPanel, .startCapture, .scheduleMinHoldTimer])
+        #expect(effects == [.startCapture, .scheduleMinHoldTimer])
         #expect(!effects.contains(.endTalkThread))
+        #expect(!effects.contains(.hideAnswerPanel))
+        #expect(m.hasAnswer)
         #expect(m.state == .recording(.hold, minHoldPassed: false))
 
         // Control arrives behind it → still Talk, thread intact.
@@ -109,7 +112,47 @@ struct TalkThreadingTests {
         m.handle(.captureFinished(hasSpeech: true))
         let effects = m.handle(.transcriptReady("some dictated text"))
         #expect(effects.contains(.endTalkThread))
+        // The panel survives the question but not the answer: once we know this was
+        // dictation, the text goes to the app and the panel has no reason to stay.
+        #expect(effects.contains(.hideAnswerPanel))
+        #expect(!m.hasAnswer)
         #expect(m.mode == .dictate)
+    }
+
+    /// Pressing the key while reading and saying nothing must not replace the answer
+    /// with a "no speech" pill — the user would lose what they were looking at.
+    @Test("An abandoned follow-up returns to the answer instead of a notice")
+    func abandonedFollowUpKeepsAnswer() {
+        var m = presentedAnswer()
+        m.handle(.optionDown); m.handle(.talkModifierEngaged)
+        m.handle(.minHoldElapsed); m.handle(.optionUp)
+        #expect(m.handle(.captureFinished(hasSpeech: false)).isEmpty)
+        #expect(m.state == .answerPresented)
+        #expect(m.hasAnswer)
+    }
+
+    @Test("Esc mid-follow-up drops the question, keeps the answer")
+    func escMidFollowUpKeepsAnswer() {
+        var m = presentedAnswer()
+        m.handle(.optionDown); m.handle(.talkModifierEngaged)
+        m.handle(.minHoldElapsed); m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+        #expect(m.state == .processing(.transcribing))
+        let effects = m.handle(.escPressed)
+        #expect(effects == [.cancelWork])
+        #expect(m.state == .answerPresented)
+    }
+
+    /// Option is also a modifier. Hitting ⌥← while reading should move the caret,
+    /// not tear the answer down.
+    @Test("An Option shortcut while reading leaves the answer up")
+    func modifierShortcutKeepsAnswer() {
+        var m = presentedAnswer()
+        m.handle(.optionDown)
+        let effects = m.handle(.otherKeyWhileOptionHeld)
+        #expect(effects == [.stopCaptureDiscard, .passThroughModifier])
+        #expect(m.state == .answerPresented)
+        #expect(m.hasAnswer)
     }
 
     @Test("Esc closes the panel and ends the thread")

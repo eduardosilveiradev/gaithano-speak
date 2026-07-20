@@ -83,16 +83,6 @@ public enum DictationState: Equatable, Sendable {
         }
     }
 
-    /// Whether the answer panel should be on screen. True while an answer is
-    /// streaming in as well as once it's complete, so the panel appears with the
-    /// first token rather than popping in at the end.
-    public var showsAnswerPanel: Bool {
-        switch self {
-        case .answerPresented: return true
-        case .processing(.answering): return true
-        default: return false
-        }
-    }
 
     /// True during the pre-commit grace window — the overlay shows a filling
     /// progress bar here instead of the waveform.
@@ -203,13 +193,31 @@ public struct DictationStateMachine: Sendable {
     /// and upgraded by `.talkModifierEngaged`; read when the transcript lands to
     /// decide between the dictation and Talk paths.
     public private(set) var mode: UtteranceMode
+    /// Whether the answer panel is on screen. Deliberately wider than
+    /// `.answerPresented` at both ends: it goes up the moment we start answering (the
+    /// panel shows "Thinking…" and then streams into it) and it stays up through a
+    /// follow-up recording, so the user can still see what they're following up on.
+    /// Kept in sync with the `.hideAnswerPanel` effect via `dismissAnswer()` — never
+    /// set it directly.
+    public private(set) var hasAnswer: Bool
 
     public init(state: DictationState = .idle,
                 secureInputActive: Bool = false,
-                mode: UtteranceMode = .dictate) {
+                mode: UtteranceMode = .dictate,
+                hasAnswer: Bool = false) {
         self.state = state
         self.secureInputActive = secureInputActive
         self.mode = mode
+        self.hasAnswer = hasAnswer
+    }
+
+    /// Tear the answer panel down. Returns the effect so the flag and the effect can
+    /// never drift apart — every `.hideAnswerPanel` in this file comes from here.
+    /// Empty when nothing is on screen, so plain dictation doesn't emit a no-op.
+    private mutating func dismissAnswer() -> [Effect] {
+        guard hasAnswer else { return [] }
+        hasAnswer = false
+        return [.hideAnswerPanel]
     }
 
     /// Apply an event, mutate `state`, and return the effects to run.
@@ -309,7 +317,9 @@ public struct DictationStateMachine: Sendable {
             }
             // Within the grace window: Option was a modifier (Raycast etc.).
             // Silently abandon and let the combo through — no sound, no overlay.
-            state = .idle
+            // An open answer stays open; using a shortcut while reading shouldn't
+            // dismiss what you're reading.
+            state = hasAnswer ? .answerPresented : .idle
             return [.stopCaptureDiscard, .passThroughModifier]
 
         case (.locked, .optionDown):
@@ -318,7 +328,8 @@ public struct DictationStateMachine: Sendable {
             return [.stopCapture, .playStopSound]
 
         case (_, .escPressed):
-            state = .idle
+            // Backing out of a follow-up returns to the answer rather than idle.
+            state = hasAnswer ? .answerPresented : .idle
             return [.stopCaptureDiscard]
 
         case (_, .maxDurationReached):
@@ -342,7 +353,7 @@ public struct DictationStateMachine: Sendable {
             state = .processing(.transcribing)
             return [.stopCapture]
         case .escPressed:
-            state = .idle
+            state = hasAnswer ? .answerPresented : .idle
             return [.stopCaptureDiscard]
         case .maxDurationReached:
             state = .processing(.transcribing)
@@ -355,41 +366,52 @@ public struct DictationStateMachine: Sendable {
     private mutating func handleProcessing(phase: ProcessingPhase, event: DictationEvent) -> [Effect] {
         switch event {
         case .escPressed:
-            state = .idle
-            // Cancelling mid-answer also tears down the panel and the conversation.
+            // Cancelling mid-answer tears down the panel and the conversation.
             if phase == .answering {
-                return [.cancelWork, .hideAnswerPanel, .endTalkThread]
+                state = .idle
+                return [.cancelWork] + dismissAnswer() + [.endTalkThread]
             }
+            // Cancelling while transcribing a follow-up abandons only that question;
+            // the answer the user was reading stays up.
+            if hasAnswer {
+                state = .answerPresented
+                return [.cancelWork]
+            }
+            state = .idle
             return [.cancelWork]
 
         case let .captureFinished(hasSpeech) where phase == .transcribing:
             if hasSpeech {
                 return [.transcribe]
             } else {
-                state = .notice(.noSpeech)
-                return [.scheduleNoticeDismiss]
+                return abandonUtterance(notice: .noSpeech)
             }
 
         case let .transcriptReady(text) where phase == .transcribing:
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
-                state = .notice(.noSpeech)
-                return [.scheduleNoticeDismiss]
+                return abandonUtterance(notice: .noSpeech)
             }
             // The one place the two modes diverge.
             switch mode {
             case .dictate:
                 state = .processing(.formatting)
-                // Returning to dictation ends any conversation that was open.
-                return [.format(trimmed), .endTalkThread]
+                // Returning to dictation ends the conversation AND takes the panel
+                // down — this utterance was text, not a follow-up.
+                return [.format(trimmed)] + dismissAnswer() + [.endTalkThread]
             case .talk:
+                // The panel appears now, not at `.answerReady` — it shows "Thinking…"
+                // and the answer streams into it.
+                hasAnswer = true
                 state = .processing(.answering)
                 return [.answer(trimmed)]
             }
 
         case .transcriptFailed where phase == .transcribing:
+            // Unlike no-speech, this is a real failure worth surfacing, so it takes
+            // the panel down to show the error rather than silently returning.
             state = .notice(.error("Transcription failed"))
-            return [.scheduleNoticeDismiss, .endTalkThread]
+            return dismissAnswer() + [.scheduleNoticeDismiss, .endTalkThread]
 
         case .answerReady where phase == .answering:
             // Streaming already put the text on screen; just stop being "busy" and
@@ -399,7 +421,7 @@ public struct DictationStateMachine: Sendable {
 
         case let .answerFailed(reason) where phase == .answering:
             state = .notice(.error(reason))
-            return [.hideAnswerPanel, .scheduleNoticeDismiss, .endTalkThread]
+            return dismissAnswer() + [.scheduleNoticeDismiss, .endTalkThread]
 
         case let .formatReady(text) where phase == .formatting:
             state = .processing(.inserting)
@@ -418,21 +440,36 @@ public struct DictationStateMachine: Sendable {
         }
     }
 
+    /// An utterance produced nothing usable. With an answer on screen this returns
+    /// to it silently — the user pressed the key while reading and said nothing, and
+    /// replacing their answer with a "no speech" pill would be a worse outcome than
+    /// simply not reacting. Otherwise it shows the notice as usual.
+    private mutating func abandonUtterance(notice: Notice) -> [Effect] {
+        if hasAnswer {
+            state = .answerPresented
+            return []
+        }
+        state = .notice(notice)
+        return [.scheduleNoticeDismiss]
+    }
+
     /// An answer is on screen. Esc closes it; a new press starts the next utterance,
     /// which becomes a follow-up if `.talkModifierEngaged` arrives behind it.
     private mutating func handleAnswerPresented(_ event: DictationEvent) -> [Effect] {
         switch event {
         case .escPressed:
             state = secureInputActive ? .blockedSecureInput : .idle
-            return [.hideAnswerPanel, .endTalkThread]
+            return dismissAnswer() + [.endTalkThread]
 
         case .optionDown where !secureInputActive:
-            // Deliberately does NOT end the thread: if Control is held this is a
-            // follow-up and the history matters. The dictate path drops the thread
-            // when the transcript lands instead.
+            // Deliberately keeps BOTH the panel and the thread: at this instant we
+            // can't know whether Control is coming, and if it is, the user is asking
+            // about the answer that's on screen — taking it away mid-question would
+            // remove the thing they're looking at. The dictate path clears both when
+            // the transcript lands instead.
             mode = .dictate
             state = .recording(.hold, minHoldPassed: false)
-            return [.hideAnswerPanel, .startCapture, .scheduleMinHoldTimer]
+            return [.startCapture, .scheduleMinHoldTimer]
 
         default:
             return []

@@ -17,6 +17,10 @@ struct FlowBarView: View {
     var mode: UtteranceMode = .dictate
     /// The Talk answer, streaming in.
     var answerText: String = ""
+    /// Whether to draw the answer panel. Comes from the coordinator rather than
+    /// `state`, because during a follow-up the state is `.recording` while the panel
+    /// must stay up — the user is asking *about* what's on screen.
+    var showsAnswerPanel: Bool = false
 
     /// Show the transcription bubble only when there's live text and we're still
     /// in an active utterance.
@@ -25,40 +29,69 @@ struct FlowBarView: View {
             && (state.isRecording || state.isProcessing)
     }
 
+    /// A follow-up has committed and we're capturing audio. Deliberately false during
+    /// the grace window: showing "Listening…" there would break the rule that nothing
+    /// happens visibly until the hold commits.
+    private var followUpListening: Bool {
+        if case .recording(_, let committed) = state { return committed }
+        if case .awaitingLockTap = state { return true }
+        return false
+    }
+
+    /// Anything in flight on top of the answer already shown — recording the next
+    /// question, transcribing it, or waiting on the model.
+    private var followUpActive: Bool {
+        if case .processing = state { return true }
+        return followUpListening
+    }
+
     var body: some View {
         VStack(spacing: 8) {
-            pill
-            if showsPartial { partialPill }
-            if state.showsAnswerPanel { answerPanel }
+            // The panel takes over status duty when it's up, so the pill and the
+            // transcription bubble would only be a second copy of the same thing.
+            if !showsAnswerPanel {
+                pill
+                if showsPartial { partialPill }
+            }
+            if showsAnswerPanel { answerPanel }
         }
         .foregroundStyle(.white)
         .font(.system(size: 12, weight: .medium, design: .monospaced))
         .animation(.easeInOut(duration: 0.15), value: showsPartial)
-        .animation(.easeInOut(duration: 0.18), value: state.showsAnswerPanel)
+        .animation(.easeInOut(duration: 0.18), value: showsAnswerPanel)
+        .animation(.easeInOut(duration: 0.18), value: followUpActive)
     }
 
     /// The Talk answer, below the pill. Appears with the first streamed token rather
-    /// than waiting for the full answer, so the wait reads as progress.
+    /// than waiting for the full answer, so the wait reads as progress. While a
+    /// follow-up is in flight it grows a status header and dims the answer, so the
+    /// previous answer stays readable as context instead of vanishing.
     private var answerPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ScrollView {
-                Text(answerText.isEmpty ? "Thinking…" : answerText)
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(answerText.isEmpty ? .white.opacity(0.5) : .white)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxHeight: 260)
+            if followUpActive { followUpHeader }
 
-            HStack(spacing: 12) {
-                hint("⌘C", "Copy")
-                hint("⌘↩", "Insert")
-                hint("esc", "Close")
-                Spacer()
-                Text("hold ⌥ to ask again")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.35))
+            if !answerText.isEmpty {
+                ScrollView {
+                    Text(answerText)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(.white.opacity(followUpActive ? 0.45 : 1))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxHeight: 260)
+            }
+
+            if !followUpActive {
+                HStack(spacing: 12) {
+                    hint("⌘C", "Copy")
+                    hint("⌘↩", "Insert")
+                    hint("esc", "Close")
+                    Spacer()
+                    Text("hold ⌥ to ask again")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
             }
         }
         .padding(14)
@@ -70,6 +103,30 @@ struct FlowBarView: View {
                     .stroke(.white.opacity(0.08), lineWidth: 1))
         )
         .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// The panel's own listening UI: a waveform (or spinner, once we're past the mic)
+    /// alongside the live words, sitting above the answer it's following up on.
+    private var followUpHeader: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                if followUpListening {
+                    WaveformView(samples: levels)
+                } else {
+                    ProgressView().controlSize(.small).tint(.white)
+                }
+                Text(partial.isEmpty ? label : partial)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.white.opacity(partial.isEmpty ? 0.55 : 0.9))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 0)
+            }
+            Rectangle()
+                .fill(.white.opacity(0.1))
+                .frame(height: 1)
+        }
         .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
