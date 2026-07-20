@@ -43,6 +43,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// tokens per format, which dominates latency for a few words of dictation.
     public var localServerModel: String
 
+    /// Model id for the Vertex formatter. Separate from `talkModel` so the two can be
+    /// tuned independently — formatting wants the cheapest model that punctuates well,
+    /// while Talk answers questions and benefits from a stronger one.
+    public var formatterVertexModel: String
+
     // MARK: Talk
 
     /// Whether holding Control alongside the dictation key asks a model instead of
@@ -89,6 +94,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 hasCompletedOnboarding: Bool = false,
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
+                formatterVertexModel: String = "gemini-3.5-flash",
                 talkEnabled: Bool = true,
                 agentEnabled: Bool = true,
                 agentAutoConfirm: Bool = false,
@@ -109,6 +115,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.localServerURL = localServerURL
         self.localServerModel = localServerModel
+        self.formatterVertexModel = formatterVertexModel
         self.talkEnabled = talkEnabled
         self.agentEnabled = agentEnabled
         self.agentAutoConfirm = agentAutoConfirm
@@ -142,6 +149,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hasCompletedOnboarding = try c.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? d.hasCompletedOnboarding
         localServerURL = try c.decodeIfPresent(String.self, forKey: .localServerURL) ?? d.localServerURL
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
+        formatterVertexModel = try c.decodeIfPresent(String.self, forKey: .formatterVertexModel) ?? d.formatterVertexModel
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
         agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
         agentAutoConfirm = try c.decodeIfPresent(Bool.self, forKey: .agentAutoConfirm) ?? d.agentAutoConfirm

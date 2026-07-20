@@ -41,6 +41,7 @@ struct SettingsView: View {
                 Picker("Formatter", selection: bind(\.preferredFormatter)) {
                     Text(FormatterID.foundationModel.displayName).tag(FormatterID.foundationModel)
                     Text(FormatterID.localServer.displayName).tag(FormatterID.localServer)
+                    Text(FormatterID.vertexGemini.displayName).tag(FormatterID.vertexGemini)
                     Text(FormatterID.deterministic.displayName).tag(FormatterID.deterministic)
                 }
                 .disabled(!environment.settings.formattingEnabled)
@@ -50,6 +51,9 @@ struct SettingsView: View {
                 }
                 if environment.settings.preferredFormatter == .localServer {
                     localServerFields
+                }
+                if environment.settings.preferredFormatter == .vertexGemini {
+                    vertexFormatterFields
                 }
             }
 
@@ -123,6 +127,24 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460, height: 420)
+    }
+
+    /// The one formatter that uploads dictation. The warning is deliberately blunt
+    /// and deliberately not collapsible — a user picking this from a dropdown has no
+    /// other cue that the app just stopped being local-first.
+    @ViewBuilder private var vertexFormatterFields: some View {
+        TextField("Model", text: bind(\.formatterVertexModel))
+            .textFieldStyle(.roundedBorder)
+        Label("Everything you dictate — in every app, not just this one — is uploaded to Google to be punctuated. That includes anything you'd never paste into a chatbot. The other formatters never leave your Mac.",
+              systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(.orange)
+        if !GoogleCredentials.isConfigured {
+            Text("No gcloud credentials found — run `gcloud auth application-default login`. Until then this falls back to basic cleanup on every utterance.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if environment.settings.vertexProjectID.isEmpty && GoogleCredentials.defaultProjectID == nil {
+            Text("No GCP project — set one under Talk, or run `gcloud config set project`.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder private var vertexFields: some View {

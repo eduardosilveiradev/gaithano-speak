@@ -49,6 +49,11 @@ final class RecordingCoordinator {
     private let hotkeyMonitor: HotkeyMonitor
     private let timings = DictationTimings()
     private let credentials = GoogleCredentials()
+    /// Computed, not stored: `@Observable` rewrites `lazy` into a computed property
+    /// and then rejects it, and a stored initialiser can't reach `credentials`.
+    /// Rebuilding is free — the struct holds one reference and the token cache lives
+    /// in `GoogleCredentials`, not here.
+    private var vertexFormatter: VertexFormatter { VertexFormatter(credentials: credentials) }
     private let localTalk = LocalServerTalkProvider()
 
     var settings: AppSettings
@@ -416,6 +421,7 @@ final class RecordingCoordinator {
         let dictionary = self.dictionary
         let formatter = self.formatter
         let localServer = self.localServer
+        let vertexFormatter = self.vertexFormatter
         let deterministic = self.deterministic
 
         workTask = Task { @MainActor [weak self] in
@@ -428,6 +434,7 @@ final class RecordingCoordinator {
             // (LM Studio / Ollama) are "model" formatters that go through the same gate.
             let usesModel = settings.preferredFormatter == .foundationModel
                 || settings.preferredFormatter == .localServer
+                || settings.preferredFormatter == .vertexGemini
 
             if settings.formattingEnabled
                 && usesModel
@@ -439,6 +446,12 @@ final class RecordingCoordinator {
                         let config = LocalServerFormatter.Config(endpoint: settings.localServerURL,
                                                                  model: settings.localServerModel)
                         result = try await localServer.format(text, hints: hints, config: config)
+                    } else if settings.preferredFormatter == .vertexGemini {
+                        let config = VertexFormatter.Config(
+                            model: settings.formatterVertexModel,
+                            projectID: settings.vertexProjectID.isEmpty ? nil : settings.vertexProjectID,
+                            region: settings.vertexRegion)
+                        result = try await vertexFormatter.format(text, hints: hints, config: config)
                     } else {
                         result = try await formatter.format(text, hints: hints)
                     }
