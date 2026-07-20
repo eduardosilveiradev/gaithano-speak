@@ -25,6 +25,11 @@ final class RecordingCoordinator {
     /// `hasAnswer` rather than `state.showsAnswerPanel`, because during a follow-up
     /// the state is `.recording` while the panel must stay on screen.
     private(set) var showsAnswerPanel = false
+    /// Earlier turns in this Talk thread, shown beneath the current answer so a
+    /// follow-up has visible context. Snapshotted when a question starts rather than
+    /// read from `talkThread` live — the thread gains the new answer on completion,
+    /// and the panel would then show the current response twice.
+    private(set) var talkHistory: [TalkTurn] = []
     /// Whether the in-flight answer has produced its first token. Until it does, the
     /// previous answer stays on screen — a follow-up shouldn't blank the panel it's
     /// asking about, and the first delta is a natural moment to swap.
@@ -63,6 +68,19 @@ final class RecordingCoordinator {
     private var talkContext: TalkContext = .none
     private var contextTask: Task<Void, Never>?
     private var answerTask: Task<Void, Never>?
+
+    /// Built lazily, on the first agent run, so the ordinary dictation path never
+    /// constructs it. Readable so the overlay can render its step list directly —
+    /// mirroring it into a second observable would just be a way to show something
+    /// other than what is actually about to happen.
+    private(set) var agentRunner: AgentRunner?
+
+    /// The step list to draw, or nil when this utterance isn't an agent one. The
+    /// runner is kept between runs, so without the mode check a later Talk answer
+    /// would appear underneath the previous run's steps.
+    var agentSession: AgentSession? {
+        mode == .agent ? agentRunner?.session : nil
+    }
 
     // Cancellable timers / tasks.
     private var minHoldTask: Task<Void, Never>?
@@ -138,6 +156,15 @@ final class RecordingCoordinator {
             // so a screenshot + AX read never shows up in answer latency.
             captureTalkContextIfNeeded()
             send(.talkModifierEngaged)
+        case .agentModifierEngaged:
+            // Requires both consents: Talk off means the gesture never got as far as
+            // a model, and agent off means it stays a question rather than an action.
+            guard settings.talkEnabled, settings.agentEnabled else { return }
+            send(.agentModifierEngaged)
+        case .agentConfirm:
+            agentRunner?.confirm()
+        case .agentAuto:
+            agentRunner?.enableAuto()
         case .copyAnswer:
             SmartInserter.copyToClipboard(answerText)
         case .insertAnswer:
@@ -253,12 +280,21 @@ final class RecordingCoordinator {
             media.resumeIfPaused()
             currentRaw = question
             answer(question)
+        case let .runAgent(task):
+            media.resumeIfPaused()
+            currentRaw = task
+            runAgent(task)
         case .hideAnswerPanel:
             answerTask?.cancel(); answerTask = nil
+            // Taking the panel down ends the run: the step list was the only place the
+            // user could see what was happening, so leaving it clicking away behind a
+            // closed panel is exactly the thing this feature must never do.
+            stopAgent()
             answerText = ""
             streamStarted = false
         case .endTalkThread:
             talkThread = []
+            talkHistory = []
             talkContext = .none
             contextTask?.cancel(); contextTask = nil
         }
@@ -484,6 +520,7 @@ final class RecordingCoordinator {
         // `answerText` is deliberately left alone — a follow-up keeps the previous
         // answer visible until its own first token arrives.
         streamStarted = false
+        talkHistory = talkThread
         // If the screenshot is still being captured, wait for it — but never let a
         // stuck capture hold the answer hostage.
         let pendingContext = contextTask
@@ -521,6 +558,43 @@ final class RecordingCoordinator {
                 self.send(.answerFailed(reason))
             }
         }
+    }
+
+    // MARK: - Agent
+
+    /// Hand the transcript to the agent and let it drive.
+    ///
+    /// Unlike `answer`, this has no local fallback. The local server has no function
+    /// calling, and an agent that can't call tools is not a degraded agent — it's a
+    /// model narrating clicks it will never make, at the price of a real run.
+    private func runAgent(_ task: String) {
+        let runner = agentRunner ?? {
+            let created = AgentRunner(model: AgentModel(credentials: credentials,
+                                                        config: settings.talkConfig))
+            created.onConfirmationChanged = { [weak self] awaiting in
+                self?.hotkeyMonitor.setAgentAwaitingConfirmation(awaiting)
+            }
+            created.onEnded = { [weak self] summary in
+                guard let self else { return }
+                self.hotkeyMonitor.setAgentAwaitingConfirmation(false)
+                self.answerText = summary
+                self.send(.answerReady)
+            }
+            agentRunner = created
+            return created
+        }()
+
+        answerText = ""
+        streamStarted = true   // the panel is showing steps, not a stream to swap in
+        runner.start(task: task)
+    }
+
+    /// Idempotent, and safe to call when nothing is running — every panel-dismissal
+    /// path goes through it.
+    private func stopAgent() {
+        guard let agentRunner else { return }
+        agentRunner.stop()
+        hotkeyMonitor.setAgentAwaitingConfirmation(false)
     }
 
     /// Run the configured provider, falling back to the local server when a cloud

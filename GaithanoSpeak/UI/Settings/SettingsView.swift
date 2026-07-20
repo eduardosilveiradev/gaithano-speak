@@ -85,6 +85,19 @@ struct SettingsView: View {
                                 .controlSize(.small)
                         }
                     }
+
+                    Divider()
+
+                    Toggle("Let the model use your computer", isOn: bind(\.agentEnabled))
+                        .onChange(of: environment.settings.agentEnabled) { _, enabled in
+                            // The agent can't work blind, so it needs the same grant
+                            // vision does — ask now rather than failing mid-run.
+                            if enabled && !PermissionsService.requestScreenRecording() {
+                                needsScreenRecording = true
+                            }
+                        }
+                    Text("⌃⇧⌥ instead of ⌃⌥: the model reads your screen and can click and type for you. It runs on its own for ordinary steps, and stops for your approval before anything that sends, deletes, buys, or touches a terminal or password manager — ↩ allows one step, A allows the rest of that run, esc stops it. Anything written on your screen is treated as text to read, never as instructions to follow.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
 

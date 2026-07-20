@@ -48,6 +48,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Whether holding Control alongside the dictation key asks a model instead of
     /// inserting text. Off sends every utterance down the normal dictation path.
     public var talkEnabled: Bool
+    /// Whether adding Shift lets the model click and type on the user's behalf.
+    ///
+    /// Off by default, and deliberately not implied by `talkEnabled`: reading the
+    /// screen and acting on it are different consents, and the second one can't be
+    /// undone by closing a panel.
+    public var agentEnabled: Bool
     public var talkProvider: TalkProviderID
     /// Model id for the Talk provider. Vertex default is `gemini-3.5-flash`.
     public var talkModel: String
@@ -75,6 +81,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
                 talkEnabled: Bool = true,
+                agentEnabled: Bool = false,
                 talkProvider: TalkProviderID = .vertexGemini,
                 talkModel: String = "gemini-3.5-flash",
                 vertexProjectID: String = "",
@@ -93,6 +100,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.localServerURL = localServerURL
         self.localServerModel = localServerModel
         self.talkEnabled = talkEnabled
+        self.agentEnabled = agentEnabled
         self.talkProvider = talkProvider
         self.talkModel = talkModel
         self.vertexProjectID = vertexProjectID
@@ -124,6 +132,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         localServerURL = try c.decodeIfPresent(String.self, forKey: .localServerURL) ?? d.localServerURL
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
+        agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
         talkProvider = (try? c.decodeIfPresent(TalkProviderID.self, forKey: .talkProvider)) ?? d.talkProvider
         talkModel = try c.decodeIfPresent(String.self, forKey: .talkModel) ?? d.talkModel
         vertexProjectID = try c.decodeIfPresent(String.self, forKey: .vertexProjectID) ?? d.vertexProjectID

@@ -74,6 +74,24 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 **Settings decoding is lenient.** `AppSettings.init(from:)` decodes every key with a default fallback so adding a setting never wipes saved preferences. Add new fields to both the memberwise init and the custom decoder.
 
+### The agent (⌃⇧⌥)
+
+A third `UtteranceMode` alongside `.dictate` and `.talk`: same capture, but the model gets tools and drives the machine. `AgentRunner` loops screenshot → `AgentModel` → `AgentRiskPolicy` → maybe confirm → `AgentExecutor` → screenshot. Off by default (`settings.agentEnabled`), and gated behind `talkEnabled` too — reading the screen and acting on it are separate consents.
+
+**The risk policy is the safety boundary, and it lives in SpeakCore.** `AgentRiskPolicy.risk(of:inApp:secureInputActive:)` is pure and unit-tested precisely so it can't be bypassed. `AgentExecutor` contains no approval logic at all — by the time it's called, the decision is already made. Don't add a "just this once" path that skips the classification.
+
+**`.blocked` outranks auto mode.** `AgentSession` checks `.blocked` *before* `autoConfirm`, so pressing A can never disarm the password-field rail. There's a test for exactly this (`autoDoesNotOverrideBlocked`); it is not incidental.
+
+**Both sides of a chord comparison must be normalised.** `normalizedRiskyCombos.contains(normalizedCombo(keys))` — comparing a sorted chord against the raw set silently classified `cmd+shift+delete` as safe, since it sorts to `cmd+delete+shift`. Green tests did not catch it.
+
+**Coordinates are image space, not screen space.** The model sees a downscaled JPEG; `ScreenCapture.Shot` carries `imageSize` and `displayBounds` together so `screenPoint(fromImage:in:)` can map back. Use `CGDisplayBounds` (top-left origin, CGEvent space), never `NSScreen.frame` — mixing them flips Y on non-primary displays, and a mapping bug looks exactly like the model being bad at finding buttons.
+
+**Prompt injection is the threat model.** The agent sees the whole screen, so every window on it is attacker-reachable text. `AgentPromptBuilder.trustBoundary` is a separate constant so a reword of the task description can't drop it, and it's asserted verbatim in tests. It's a floor, not a guarantee — the real rail is the confirmation policy.
+
+**Non-streaming `generateContent`.** Function calls arrive fragmented over SSE, and there's nothing to stream to anyway: the action doesn't exist until the call is complete. History crosses an isolation boundary as JSON `Data`, not `[String: Any]` — do not "simplify" that with `@unchecked Sendable`. Only the newest screenshot is kept in history (`pruneOldScreenshots`); each is ~1000 prompt tokens.
+
+**Taking the panel down ends the run.** `.hideAnswerPanel` calls `stopAgent()`. The step list is the only place the user can see what's happening, so a run must never outlive it.
+
 ### Signing / TCC
 
 `Scripts/build-app.sh` prefers a real Apple Development identity so Accessibility and Microphone grants survive rebuilds; ad-hoc signing resets them every build. Two things in the script are deliberate and must not be "cleaned up":

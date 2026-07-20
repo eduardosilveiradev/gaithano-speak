@@ -15,6 +15,12 @@ public enum UtteranceMode: Equatable, Sendable {
     case dictate
     /// Control+Option — transcribe, ask a model, show the answer in a panel.
     case talk
+    /// Control+Shift+Option — transcribe, then let the model act on the screen.
+    ///
+    /// A strict upgrade of `.talk`: same capture, same panel, but the model gets
+    /// tools. It is a separate mode rather than a flag on `.talk` because the
+    /// difference is not cosmetic — one reads the screen, the other changes it.
+    case agent
 }
 
 /// Which async stage of processing is in flight.
@@ -119,6 +125,11 @@ public enum DictationEvent: Equatable, Sendable {
     /// May arrive at `optionDown` (Control already held) or mid-capture (Control
     /// pressed after Option). Sticky: releasing Control does not revert it.
     case talkModifierEngaged
+    /// Shift joined Control+Option — this utterance is an agent task. Sticky in the
+    /// same way, and one-directional: an utterance can be upgraded to `.agent` but
+    /// never downgraded back to `.talk`, so letting go of Shift mid-sentence can't
+    /// quietly turn an approved action run into something else.
+    case agentModifierEngaged
     /// A provider finished streaming an answer. The answer text itself never passes
     /// through the reducer — it streams onto the coordinator, like `livePartial`.
     case answerReady
@@ -147,6 +158,8 @@ public enum Effect: Equatable, Sendable {
     case playStopSound
     /// Ask the configured Talk provider, streaming the answer into the panel.
     case answer(String)
+    /// Hand the transcript to the agent runner, which will act on the screen.
+    case runAgent(String)
     /// Take the answer panel off screen (visual only — the thread survives, so a
     /// follow-up question can continue the conversation).
     case hideAnswerPanel
@@ -236,7 +249,13 @@ public struct DictationStateMachine: Sendable {
         // The Talk upgrade is likewise state-agnostic: it only matters that an
         // utterance is in flight, not which phase it's in.
         if case .talkModifierEngaged = event {
-            if state.isRecording { mode = .talk }
+            // Never demote an already-upgraded utterance: Control and Shift arrive as
+            // separate events, so a Control that lands after Shift must not undo it.
+            if state.isRecording, mode != .agent { mode = .talk }
+            return []
+        }
+        if case .agentModifierEngaged = event {
+            if state.isRecording { mode = .agent }
             return []
         }
 
@@ -410,6 +429,13 @@ public struct DictationStateMachine: Sendable {
                 hasAnswer = true
                 state = .processing(.answering)
                 return [.answer(trimmed)]
+            case .agent:
+                // Shares `.answering` and the panel with Talk: from the reducer's side
+                // both are "something long is running and the panel is showing it".
+                // What differs is who executes the effect.
+                hasAnswer = true
+                state = .processing(.answering)
+                return [.runAgent(trimmed)]
             }
 
         case .transcriptFailed where phase == .transcribing:

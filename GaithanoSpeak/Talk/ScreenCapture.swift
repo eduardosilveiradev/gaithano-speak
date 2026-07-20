@@ -30,7 +30,47 @@ enum ScreenCapture {
     ///
     /// Called at recording start rather than at question time, so the capture
     /// overlaps with the user still speaking instead of adding to answer latency.
+    /// A capture plus the geometry needed to turn the model's coordinates back into
+    /// real ones. The agent maps clicks through `imageSize` → `displayBounds`, so
+    /// these must describe *this* image and *this* display or every click lands in
+    /// the wrong place — a failure that looks exactly like the model being bad at
+    /// finding buttons, which is why the two travel together instead of being
+    /// recomputed at click time.
+    struct Shot: Sendable {
+        /// The JPEG actually sent to the model.
+        var jpeg: Data
+        /// Pixel dimensions of that JPEG, after downscaling.
+        var imageSize: CGSize
+        /// The captured display in global CoreGraphics coordinates — top-left origin,
+        /// which is the space `CGEvent` mouse positions live in.
+        var displayBounds: CGRect
+    }
+
+    /// Map a point the model gave us (pixels in the screenshot) to a global screen
+    /// point suitable for `CGEvent`. Clamped to the display: a model that hallucinates
+    /// an off-screen coordinate should click a harmless edge, not warp to another
+    /// monitor.
+    static func screenPoint(fromImage point: CGPoint, in shot: Shot) -> CGPoint {
+        guard shot.imageSize.width > 0, shot.imageSize.height > 0 else {
+            return CGPoint(x: shot.displayBounds.midX, y: shot.displayBounds.midY)
+        }
+        let scaleX = shot.displayBounds.width / shot.imageSize.width
+        let scaleY = shot.displayBounds.height / shot.imageSize.height
+        let x = shot.displayBounds.minX + point.x * scaleX
+        let y = shot.displayBounds.minY + point.y * scaleY
+        return CGPoint(
+            x: min(max(x, shot.displayBounds.minX), shot.displayBounds.maxX - 1),
+            y: min(max(y, shot.displayBounds.minY), shot.displayBounds.maxY - 1)
+        )
+    }
+
+    /// Talk's vision context: the image alone.
     static func screenJPEG() async -> Data? {
+        await capture()?.jpeg
+    }
+
+    /// The agent's capture: image plus the geometry to map clicks back.
+    static func capture() async -> Shot? {
         guard CGPreflightScreenCaptureAccess() else {
             Log.talk.info("Screen Recording permission not granted; Talk stays text-only")
             return nil
@@ -65,7 +105,13 @@ enum ScreenCapture {
 
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config)
-            return jpeg(from: image)
+            guard let encoded = jpeg(from: image) else { return nil }
+            // `CGDisplayBounds`, not `NSScreen.frame`: the former is top-left origin
+            // global CG space, which is what CGEvent mouse positions use. Mixing the
+            // two flips Y on any non-primary display.
+            return Shot(jpeg: encoded.data,
+                        imageSize: encoded.size,
+                        displayBounds: CGDisplayBounds(display.displayID))
         } catch {
             Log.talk.error("Screen capture failed: \(error.localizedDescription, privacy: .public)")
             return nil
@@ -86,8 +132,9 @@ enum ScreenCapture {
         return content.displays.first
     }
 
-    /// Downscale to `maxDimension` on the long edge and JPEG-encode.
-    private static func jpeg(from image: CGImage) -> Data? {
+    /// Downscale to `maxDimension` on the long edge and JPEG-encode, returning the
+    /// final pixel size alongside the bytes so callers can map coordinates into it.
+    private static func jpeg(from image: CGImage) -> (data: Data, size: CGSize)? {
         let width = CGFloat(image.width)
         let height = CGFloat(image.height)
         let scale = min(1, maxDimension / max(width, height))
@@ -116,6 +163,6 @@ enum ScreenCapture {
         guard CGImageDestinationFinalize(destination) else { return nil }
 
         Log.talk.info("Captured screen screenshot (\(data.length / 1024) KB)")
-        return data as Data
+        return (data as Data, target)
     }
 }

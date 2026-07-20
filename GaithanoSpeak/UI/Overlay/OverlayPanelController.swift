@@ -46,14 +46,16 @@ final class OverlayPanelController {
     /// panel with the Flow Bar anchored near the bottom), rather than following the cursor.
     func update(state: DictationState, level: Float, partial: String = "", arming: Double = 0,
                 levels: [Float] = [], mode: UtteranceMode = .dictate, answerText: String = "",
-                showsAnswerPanel: Bool = false) {
+                showsAnswerPanel: Bool = false, history: [TalkTurn] = [],
+                agent: AgentSession? = nil) {
         let frame = activeScreenFrame()
         if panel.frame != frame { panel.setFrame(frame, display: true) }
 
         hostingView.rootView = AnyView(
             FlowBarView(state: state, level: level, partial: partial, arming: arming,
                         levels: levels, mode: mode, answerText: answerText,
-                        showsAnswerPanel: showsAnswerPanel)
+                        showsAnswerPanel: showsAnswerPanel, history: history,
+                        agent: agent)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, 96)
         )
