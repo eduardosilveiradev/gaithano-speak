@@ -54,15 +54,27 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 ### Non-obvious invariants
 
-**Option-as-modifier.** The hotkey is the Option key, which users also press for ⌥←, ⌥e, ⌥Tab, Raycast. The design resolving this: `optionDown` starts capture *provisionally* and silently. Only after `minHold` (0.5s) does dictation "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`). `HotkeyMonitor` never consumes the modifier; it consumes Esc only while a dictation is active. Don't add feedback before commit, and don't consume Option.
+**Option-as-modifier.** The hotkey is the Option key, which users also press for ⌥←, ⌥e, ⌥Tab, Raycast. The mechanism resolving this: `optionDown` starts capture *provisionally* and silently, and only after `minHold` does dictation "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`).
+
+**`minHold` currently defaults to 0**, which switches that protection off: the user asked for instant start, judging the half-second wait worse than the collisions. ⌥-combos now start a dictation. The machinery is intact and timing-driven, so raising `minHold` restores it — keep the provisional/commit split and the abandon path working, and don't collapse them into "commit immediately" just because the default makes the window empty. `HotkeyMonitor` never consumes the modifier; it consumes Esc only while a dictation is active. Don't add feedback before commit, and don't consume Option.
 
 **Secure input.** When a password field has focus the machine goes to `.blockedSecureInput` and the hotkey is disarmed. If secure input turns on mid-dictation, insertion reroutes to the clipboard rather than synthesized keystrokes.
 
 **Foundation Model latency.** ~5–9s cold, ~0.5–3s warm. `formatter.prewarm()` fires when *recording starts* so the model is hot by the time a transcript exists. The 10s timeout is deliberately generous — a short timeout silently degrades every dictation to grammar-blind deterministic cleanup. Plain-string generation is used, not guided `@Generable` (guided measured ~7s even warm). A fresh `LanguageModelSession` is created per format call so prior dictations can't bleed into context; `keepWarm` exists only to hold weights resident.
 
+**`.vertexGemini` is the one formatter that leaves the machine.** `VertexFormatter` uploads every dictated utterance, in every app, to Google. It's offered because the on-device model is grammar-blind on long input and Apple Intelligence silently refuses some content — but it is not the default, and the Settings warning is deliberately blunt and non-collapsible. Keep that copy honest; a user picking it from a dropdown has no other cue that local-first just stopped applying. It shares `vertexProjectID`/`vertexRegion` with Talk but has its own `formatterVertexModel`, and its timeout is 8s rather than Talk's — it sits in the dictation path, so the wait is felt on every utterance, and `DeterministicCleanup` is one `catch` away.
+
 **Formatter fallback chain.** Any formatter throw is non-fatal — the coordinator catches and falls back to `DeterministicCleanup`. Short utterances (< `PromptBuilder.minWordsForModel`) and over-long ones (> `maxCharsForModel`) skip the model entirely, *unless* the focused field already has text, in which case the model is forced so the merge/casing is right.
 
 **Cursor-context merging.** `AccessibilityContext.focusedTextContext()` reads text around the caret via AX and feeds it to the prompt so dictation continues a half-finished sentence cleanly. Many Electron/web apps expose nothing — every path must degrade gracefully to nil, falling back to `TextRepair.appendSeparatorSpace`.
+
+**The dictionary learns from the formatter, and the gates are the feature.** `DictionaryLearner.observe(heard:written:)` LCS-aligns the text handed to the model against the text it returned, and proposes dictionary entries from the differences. The point is that the model fixes proper nouns *with sentence context* the dictionary pass can never see — recording those fixes makes them permanent, and makes them work on the short-utterance and offline paths where the model never runs.
+
+Almost everything a formatter changes is grammar, and grammar is not vocabulary. A candidate has to clear **both** gates: `looksLikeTerm` (internal capital, a digit, or internal/leading punctuation — which keeps `GRDB`/`CoreML`/`GPT-4`/`.NET` and rejects `Their`) **and** `Phonetics.areClose` (consonant skeleton, digits expanded to their spoken words). Sentence-initial capitals are excluded from the casing path because every word can have one. More than `maxPerUtterance` candidates means the model paraphrased rather than corrected, and the whole batch is discarded. Loosening either gate is how this feature starts silently corrupting dictations: a wrong entry reads as correct to the person who meant to say it.
+
+Casing fixes promote themselves at `casingThreshold`; spelling fixes only ever *suggest*, unless the user opts into `dictionaryLearningAutoAccept`. A dismissal is permanent — `LearningPolicy.decision` returns `.hold` for any non-`.pending` state, so nothing already settled is ever re-counted or re-offered.
+
+Capture the pair inside `format(_:)`, at the moment the model returns, and nowhere else: the dictionary post-pass and `TextRepair` run afterwards, and learning from those would teach the dictionary its own output. `learnFromLastFormat()` runs at `.persist`, after insertion, so none of it is on the latency path.
 
 **Insertion strategy.** `SmartInserter` types short strings (≤12 chars, no clipboard clobber) and pastes longer ones via synthesized ⌘V. `PasteboardInserter` snapshots and restores the user's clipboard, and skips restoring if `changeCount` shows someone else grabbed it.
 
@@ -71,6 +83,28 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 **`@Observable` + `didSet` does not fire reliably.** All settings mutation goes through `AppEnvironment.applySettings(_:)` / `updateSetting(_:_:)`, which persist explicitly. Never add a `didSet` persistence hook.
 
 **Settings decoding is lenient.** `AppSettings.init(from:)` decodes every key with a default fallback so adding a setting never wipes saved preferences. Add new fields to both the memberwise init and the custom decoder.
+
+### The agent (⌃⌥, when enabled)
+
+A third `UtteranceMode` alongside `.dictate` and `.talk`: same capture, but the model gets tools and drives the machine. `AgentRunner` loops screenshot → `AgentModel` → `AgentRiskPolicy` → maybe confirm → `AgentExecutor` → screenshot. Gated on `settings.agentEnabled` *and* `talkEnabled`; both default on.
+
+**The agent has no gesture of its own.** `HotkeyMonitor` emits `.talkModifierEngaged` then `.agentModifierEngaged` for the same ⌃⌥ chord, unconditionally; which one wins is decided by the `settings.agentEnabled` guard in the coordinator, and the reducer's refusal to demote `.agent` back to `.talk` is what makes the ordered pair resolve. So the settings toggle *is* the mode switch — with the agent on there is no way to ask a plain question, and with it off ⌃⌥ answers as before. Shift is no longer read; don't reintroduce it as a discriminator without fixing the demotion problem (a user who adds Shift after Option is already down would emit the events in the wrong order).
+
+**The agent ignores `talkVisionEnabled` and always screenshots** — it can't act on a screen it can't see. Settings says so explicitly when that toggle is off rather than letting it appear to cover both gestures.
+
+**The risk policy is the safety boundary, and it lives in SpeakCore.** `AgentRiskPolicy.risk(of:inApp:secureInputActive:)` is pure and unit-tested precisely so it can't be bypassed. `AgentExecutor` contains no approval logic at all — by the time it's called, the decision is already made. Don't add a "just this once" path that skips the classification.
+
+**`.blocked` outranks auto mode.** `AgentSession` checks `.blocked` *before* `autoConfirm`, so pressing A can never disarm the password-field rail. There's a test for exactly this (`autoDoesNotOverrideBlocked`); it is not incidental.
+
+**Both sides of a chord comparison must be normalised.** `normalizedRiskyCombos.contains(normalizedCombo(keys))` — comparing a sorted chord against the raw set silently classified `cmd+shift+delete` as safe, since it sorts to `cmd+delete+shift`. Green tests did not catch it.
+
+**Coordinates are image space, not screen space.** The model sees a downscaled JPEG; `ScreenCapture.Shot` carries `imageSize` and `displayBounds` together so `screenPoint(fromImage:in:)` can map back. Use `CGDisplayBounds` (top-left origin, CGEvent space), never `NSScreen.frame` — mixing them flips Y on non-primary displays, and a mapping bug looks exactly like the model being bad at finding buttons.
+
+**Prompt injection is the threat model.** The agent sees the whole screen, so every window on it is attacker-reachable text. `AgentPromptBuilder.trustBoundary` is a separate constant so a reword of the task description can't drop it, and it's asserted verbatim in tests. It's a floor, not a guarantee — the real rail is the confirmation policy.
+
+**Non-streaming `generateContent`.** Function calls arrive fragmented over SSE, and there's nothing to stream to anyway: the action doesn't exist until the call is complete. History crosses an isolation boundary as JSON `Data`, not `[String: Any]` — do not "simplify" that with `@unchecked Sendable`. Only the newest screenshot is kept in history (`pruneOldScreenshots`); each is ~1000 prompt tokens.
+
+**Taking the panel down ends the run.** `.hideAnswerPanel` calls `stopAgent()`. The step list is the only place the user can see what's happening, so a run must never outlive it.
 
 ### Signing / TCC
 

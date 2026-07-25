@@ -59,6 +59,30 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        // A real migration rather than a schema bump: dictionary entries are typed
+        // by hand and must survive. (`eraseDatabaseOnSchemaChange` above only fires
+        // in DEBUG, and this is exactly the data it would throw away.)
+        migrator.registerMigration("v2_dictionary_learning") { db in
+            try db.alter(table: "dictionaryEntry") { t in
+                t.add(column: "source", .text).notNull().defaults(to: DictionaryEntrySource.manual.rawValue)
+            }
+
+            try db.create(table: "learnedTerm") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("phrase", .text).notNull()
+                t.column("replacement", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("occurrences", .integer).notNull().defaults(to: 0)
+                t.column("firstSeen", .datetime).notNull()
+                t.column("lastSeen", .datetime).notNull()
+                t.column("state", .text).notNull().defaults(to: LearnedTerm.State.pending.rawValue)
+            }
+            // One row per pair — the count is the whole point, so duplicates would
+            // silently stop anything ever reaching its threshold.
+            try db.create(indexOn: "learnedTerm", columns: ["phrase", "replacement"], options: .unique)
+            try db.create(indexOn: "learnedTerm", columns: ["state"])
+        }
+
         return migrator
     }
 
@@ -127,5 +151,115 @@ public final class AppDatabase: Sendable {
     /// A `PersonalDictionary` snapshot for the pipeline.
     public func personalDictionary() throws -> PersonalDictionary {
         PersonalDictionary(entries: try allDictionaryEntries())
+    }
+
+    // MARK: - Learning queries
+
+    /// Fold one utterance's observations into the learning table and act on any
+    /// that crossed their threshold.
+    ///
+    /// The whole transaction is one write so a crash between "count it" and
+    /// "promote it" can't leave a term stuck one occurrence short forever.
+    @discardableResult
+    public func learn(from observations: [TermObservation],
+                      policy: LearningPolicy = .default,
+                      now: Date = Date()) throws -> LearningOutcome {
+        guard !observations.isEmpty else { return LearningOutcome() }
+
+        return try dbWriter.write { db in
+            var outcome = LearningOutcome()
+
+            for observation in observations {
+                var term: LearnedTerm
+                if var existing = try LearnedTerm
+                    .filter(Column("phrase") == observation.phrase
+                            && Column("replacement") == observation.replacement)
+                    .fetchOne(db) {
+                    // Settled means settled — don't keep counting something the
+                    // user dismissed or that's already a dictionary entry.
+                    guard existing.state == .pending else { continue }
+                    existing.occurrences += 1
+                    existing.lastSeen = now
+                    try existing.update(db)
+                    term = existing
+                } else {
+                    term = LearnedTerm(phrase: observation.phrase,
+                                       replacement: observation.replacement,
+                                       kind: observation.kind,
+                                       occurrences: 1,
+                                       firstSeen: now,
+                                       lastSeen: now)
+                    try term.insert(db)
+                }
+
+                switch policy.decision(for: term) {
+                case .hold:
+                    continue
+                case .suggest:
+                    outcome.suggested.append(term)
+                case .accept:
+                    // A rule the user wrote by hand wins. Mark the term accepted
+                    // anyway so it stops being counted and re-offered.
+                    let collides = try DictionaryEntry
+                        .filter(Column("phrase") == observation.phrase)
+                        .fetchCount(db) > 0
+                    term.state = .accepted
+                    try term.update(db)
+                    guard !collides else { continue }
+                    var entry = term.asDictionaryEntry
+                    try entry.insert(db)
+                    outcome.accepted.append(entry)
+                }
+            }
+
+            return outcome
+        }
+    }
+
+    /// Terms waiting on the user, most-repeated first.
+    public func pendingLearnedTerms(policy: LearningPolicy = .default) throws -> [LearnedTerm] {
+        try dbWriter.read { db in
+            try LearnedTerm
+                .filter(Column("state") == LearnedTerm.State.pending.rawValue)
+                .order(Column("occurrences").desc, Column("lastSeen").desc)
+                .fetchAll(db)
+                .filter { policy.decision(for: $0) == .suggest }
+        }
+    }
+
+    /// Promote a suggestion into the dictionary.
+    @discardableResult
+    public func acceptLearnedTerm(id: Int64) throws -> DictionaryEntry? {
+        try dbWriter.write { db in
+            guard var term = try LearnedTerm.fetchOne(db, key: id) else { return nil }
+            term.state = .accepted
+            try term.update(db)
+
+            guard try DictionaryEntry.filter(Column("phrase") == term.phrase).fetchCount(db) == 0
+            else { return nil }
+            var entry = term.asDictionaryEntry
+            try entry.insert(db)
+            return entry
+        }
+    }
+
+    /// Refuse a suggestion. Permanent — it is never proposed again.
+    public func dismissLearnedTerm(id: Int64) throws {
+        try dbWriter.write { db in
+            guard var term = try LearnedTerm.fetchOne(db, key: id) else { return }
+            term.state = .dismissed
+            try term.update(db)
+        }
+    }
+
+    /// Wipe everything learning has recorded, including its promoted entries.
+    /// Dismissals go too — this is a reset, not a re-offer.
+    public func forgetLearnedTerms() throws {
+        _ = try dbWriter.write { db in
+            try DictionaryEntry
+                .filter(Column("source") == DictionaryEntrySource.learned.rawValue)
+                .deleteAll(db)
+            try LearnedTerm.deleteAll(db)
+        }
     }
 }

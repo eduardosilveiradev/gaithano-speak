@@ -13,6 +13,18 @@ struct FlowBarView: View {
     var arming: Double = 0
     /// Rolling history of recent audio levels (oldest → newest) for the waveform.
     var levels: [Float] = []
+    /// Whether this utterance is a Talk question rather than dictation.
+    var mode: UtteranceMode = .dictate
+    /// The Talk answer, streaming in.
+    var answerText: String = ""
+    /// Whether to draw the answer panel. Comes from the coordinator rather than
+    /// `state`, because during a follow-up the state is `.recording` while the panel
+    /// must stay up — the user is asking *about* what's on screen.
+    var showsAnswerPanel: Bool = false
+    /// Earlier turns in this thread, oldest first.
+    var history: [TalkTurn] = []
+    /// The live agent run, when this utterance was an agent task.
+    var agent: AgentSession?
 
     /// Show the transcription bubble only when there's live text and we're still
     /// in an active utterance.
@@ -21,14 +33,207 @@ struct FlowBarView: View {
             && (state.isRecording || state.isProcessing)
     }
 
+    /// A follow-up has committed and we're capturing audio. Deliberately false during
+    /// the grace window: showing "Listening…" there would break the rule that nothing
+    /// happens visibly until the hold commits.
+    private var followUpListening: Bool {
+        if case .recording(_, let committed) = state { return committed }
+        if case .awaitingLockTap = state { return true }
+        return false
+    }
+
+    /// Anything in flight on top of the answer already shown — recording the next
+    /// question, transcribing it, or waiting on the model.
+    private var followUpActive: Bool {
+        if case .processing = state { return true }
+        return followUpListening
+    }
+
     var body: some View {
         VStack(spacing: 8) {
-            pill
-            if showsPartial { partialPill }
+            // The panel takes over status duty when it's up, so the pill and the
+            // transcription bubble would only be a second copy of the same thing.
+            if !showsAnswerPanel {
+                pill
+                if showsPartial { partialPill }
+            }
+            if showsAnswerPanel { answerPanel }
         }
         .foregroundStyle(.white)
         .font(.system(size: 12, weight: .medium, design: .monospaced))
         .animation(.easeInOut(duration: 0.15), value: showsPartial)
+        .animation(.easeInOut(duration: 0.18), value: showsAnswerPanel)
+        .animation(.easeInOut(duration: 0.18), value: followUpActive)
+    }
+
+    /// The Talk answer, below the pill. Appears with the first streamed token rather
+    /// than waiting for the full answer, so the wait reads as progress. While a
+    /// follow-up is in flight it grows a status header and dims the answer, so the
+    /// previous answer stays readable as context instead of vanishing.
+    private var answerPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if followUpActive { followUpHeader }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let agent { agentSteps(agent) }
+
+                    if !answerText.isEmpty {
+                        MarkdownText(source: answerText)
+                            .foregroundStyle(.white.opacity(followUpActive ? 0.45 : 1))
+                    }
+
+                    // Newest first, directly under the current answer — scrolling down
+                    // walks back in time, which is the direction you reach for when
+                    // you're checking what you already asked.
+                    if !history.isEmpty { historyList }
+                }
+            }
+            .frame(maxHeight: 300)
+
+            if let agent, case let .awaitingConfirmation(_, reason) = agent.status {
+                confirmationBar(reason: reason)
+            } else if !followUpActive {
+                HStack(spacing: 12) {
+                    hint("⌘C", "Copy")
+                    hint("⌘↩", "Insert")
+                    hint("esc", "Close")
+                    Spacer()
+                    Text("hold ⌥ to ask again")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.black.opacity(0.88))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// The panel's own listening UI: a waveform (or spinner, once we're past the mic)
+    /// alongside the live words, sitting above the answer it's following up on.
+    private var followUpHeader: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                if followUpListening {
+                    WaveformView(samples: levels)
+                } else {
+                    ProgressView().controlSize(.small).tint(.white)
+                }
+                Text(partial.isEmpty ? label : partial)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.white.opacity(partial.isEmpty ? 0.55 : 0.9))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 0)
+            }
+            Rectangle()
+                .fill(.white.opacity(0.1))
+                .frame(height: 1)
+        }
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// Earlier turns, newest first, visibly subordinate to the current answer.
+    private var historyList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Rectangle().fill(.white.opacity(0.1)).frame(height: 1)
+            ForEach(Array(history.enumerated()).reversed(), id: \.offset) { _, turn in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(turn.role == .user ? "you" : "reply")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.3))
+                    // Only replies get the markdown pass. A user turn is a transcript
+                    // of speech, so its asterisks and hashes are words the user said.
+                    Group {
+                        if turn.role == .user {
+                            Text(turn.text)
+                                .font(.system(size: 12))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            MarkdownText(source: turn.text, size: 12)
+                        }
+                    }
+                    .foregroundStyle(.white.opacity(turn.role == .user ? 0.5 : 0.38))
+                }
+            }
+        }
+    }
+
+    /// What the agent has done, and what it's about to do. Every executed step stays
+    /// listed: the user needs to be able to see what happened on their machine, not
+    /// just the latest frame of it.
+    private func agentSteps(_ session: AgentSession) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(session.steps.enumerated()), id: \.offset) { _, step in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: step.confirmed ? "checkmark.shield" : "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(width: 12)
+                    Text(step.action.summary)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if case let .awaitingConfirmation(action, _) = session.status {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                        .frame(width: 12)
+                    Text(action.summary)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if case let .executing(action) = session.status {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.mini).tint(.white).frame(width: 12)
+                    Text(action.summary)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+            }
+        }
+    }
+
+    /// The three ways out of a pending step. `auto` is listed alongside the others
+    /// rather than tucked away, because a user who is going to hold Return down
+    /// anyway is better off saying so once, knowingly.
+    private func confirmationBar(reason: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(reason)
+                .font(.system(size: 10))
+                .foregroundStyle(.orange.opacity(0.9))
+            HStack(spacing: 12) {
+                hint("↩", "Allow")
+                hint("A", "Auto")
+                hint("esc", "Stop")
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func hint(_ key: String, _ action: String) -> some View {
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(.white.opacity(0.12)))
+            Text(action).font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
+        }
     }
 
     /// ONE pill container for every state, so its size tweens between states
@@ -137,12 +342,14 @@ struct FlowBarView: View {
         switch state {
         case .idle: return "Press (⌥) to speak"
         case .blockedSecureInput: return "Secure input active"
-        case .recording(.hold, _): return "Listening…"
+        case .recording(.hold, _): return mode == .talk ? "Asking…" : "Listening…"
         case .recording(.locked, _): return "Listening (hands-free)…"
         case .awaitingLockTap: return "Listening…"
         case .processing(.transcribing): return "Transcribing…"
         case .processing(.formatting): return "Formatting…"
+        case .processing(.answering): return "Thinking…"
         case .processing(.inserting): return "Inserting…"
+        case .answerPresented: return "Answer"
         case .notice(.noSpeech): return "No speech detected"
         case .notice(.error(let m)): return m
         case .notice(.copiedToClipboard(let r)): return r

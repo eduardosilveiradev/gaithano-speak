@@ -59,6 +59,30 @@ enum AccessibilityContext {
         )
     }
 
+    /// Text the user currently has selected in the focused element, or nil if there
+    /// is no selection or the app doesn't expose one. Talk uses this to ground a
+    /// question like "what does this mean?" in whatever the user highlighted.
+    static func selectedText() -> String? {
+        guard PermissionsService.accessibilityGranted else { return nil }
+
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else {
+            return nil
+        }
+
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element as! AXUIElement,
+                                            kAXSelectedTextAttribute as CFString,
+                                            &selectedRef) == .success,
+              let selected = selectedRef as? String else {
+            return nil
+        }
+        let trimmed = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// Screen bounds of the text insertion caret, in Core Graphics global coordinates
     /// (top-left origin), or nil if the focused element doesn't expose it. Native
     /// text views support this; most Electron/web apps (Claude Desktop, browsers, VS

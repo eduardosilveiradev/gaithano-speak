@@ -19,6 +19,9 @@ public enum FormatterID: String, Codable, Sendable, CaseIterable {
     case deterministic
     case claude
     case localServer
+    /// Gemini on Vertex. The only formatter that leaves the machine — see
+    /// `VertexFormatter` for why it's offered and why it isn't the default.
+    case vertexGemini
 
     public var displayName: String {
         switch self {
@@ -26,6 +29,7 @@ public enum FormatterID: String, Codable, Sendable, CaseIterable {
         case .deterministic: return "Basic cleanup"
         case .claude: return "Claude (cloud)"
         case .localServer: return "Local LLM (LM Studio / Ollama)"
+        case .vertexGemini: return "Gemini on Vertex (cloud)"
         }
     }
 }

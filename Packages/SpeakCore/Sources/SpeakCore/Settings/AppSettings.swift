@@ -1,10 +1,10 @@
 import Foundation
 
 /// Which physical key(s) arm dictation.
+///
+/// Adding Control to whichever choice is active upgrades the utterance to Talk, so
+/// no option here may itself require Control — that gesture is spoken for.
 public enum HotkeyChoice: String, Codable, Sendable, CaseIterable {
-    /// Control + Option held together. Far less likely to collide with a normal
-    /// keystroke than bare Option, so the grace window rarely has to abandon.
-    case controlOption
     case eitherOption
     case leftOption
     case rightOption
@@ -12,7 +12,6 @@ public enum HotkeyChoice: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .controlOption: return "Control + Option (⌃⌥)"
         case .eitherOption: return "Either Option (⌥)"
         case .leftOption: return "Left Option (⌥)"
         case .rightOption: return "Right Option (⌥)"
@@ -44,7 +43,64 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// tokens per format, which dominates latency for a few words of dictation.
     public var localServerModel: String
 
-    public init(hotkey: HotkeyChoice = .controlOption,
+    /// Model id for the Vertex formatter. Separate from `talkModel` so the two can be
+    /// tuned independently — formatting wants the cheapest model that punctuates well,
+    /// while Talk answers questions and benefits from a stronger one.
+    public var formatterVertexModel: String
+
+    // MARK: Dictionary learning
+
+    /// Watch what the formatter corrects and build dictionary entries from it.
+    ///
+    /// On by default: the observations are drawn from text that already went through
+    /// the formatter, so nothing new leaves the machine, and the promotion rules are
+    /// narrow enough that a wrong entry is rare. Off stops both the counting and the
+    /// suggestions — it does not remove what was already learned.
+    public var dictionaryLearningEnabled: Bool
+    /// Let spelling substitutions in without asking.
+    ///
+    /// Off by default, and the one setting here worth being careful with. A casing
+    /// fix can only recapitalise a word the user already said; a spelling fix swaps
+    /// one word for another on every future dictation, and a wrong one reads as
+    /// correct to the person who meant to say it.
+    public var dictionaryLearningAutoAccept: Bool
+
+    // MARK: Talk
+
+    /// Whether holding Control alongside the dictation key asks a model instead of
+    /// inserting text. Off sends every utterance down the normal dictation path.
+    public var talkEnabled: Bool
+    /// Whether adding Shift lets the model click and type on the user's behalf.
+    ///
+    /// On by default: this is a personal, directly-distributed tool whose owner asked
+    /// for the gesture to be armed, and leaving it off made ⌃⇧⌥ silently behave like
+    /// ⌃⌥ — a worse failure than the one the default was guarding against, since the
+    /// user can't tell which mode they're in. What actually keeps this safe is
+    /// `AgentRiskPolicy`, not the default, and that is unchanged.
+    public var agentEnabled: Bool
+    /// Start every agent run already in auto mode, so risky steps never stop to ask.
+    ///
+    /// Off by default and kept separate from `agentEnabled` because it removes the
+    /// feature's only interactive rail. `.blocked` actions (typing while a password
+    /// field has focus) are still refused — `AgentSession` checks those ahead of
+    /// `autoConfirm`, and that ordering is not negotiable.
+    public var agentAutoConfirm: Bool
+    public var talkProvider: TalkProviderID
+    /// Model id for the Talk provider. Vertex default is `gemini-3.5-flash`.
+    public var talkModel: String
+    /// GCP project for Vertex. Empty falls back to the project gcloud's Application
+    /// Default Credentials were set up against, so the usual case needs no setup.
+    public var vertexProjectID: String
+    public var vertexRegion: String
+    /// Attach a screenshot of the focused window to Talk questions. Requires the
+    /// Screen Recording permission, and sends an image of the user's screen to the
+    /// provider — off by default because that is not a small thing to opt into.
+    public var talkVisionEnabled: Bool
+    /// Gemini thinking budget. 0 by default: Talk answers short questions, and
+    /// reasoning tokens dominate latency at that length.
+    public var talkThinkingBudget: Int
+
+    public init(hotkey: HotkeyChoice = .eitherOption,
                 engine: EngineID = .parakeet,
                 formattingEnabled: Bool = true,
                 preferredFormatter: FormatterID = .foundationModel,
@@ -54,7 +110,19 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 pauseAudioWhileListening: Bool = true,
                 hasCompletedOnboarding: Bool = false,
                 localServerURL: String = "http://localhost:1234/v1",
-                localServerModel: String = "gemma-4-e2b-it-mlx") {
+                localServerModel: String = "gemma-4-e2b-it-mlx",
+                formatterVertexModel: String = "gemini-3.5-flash",
+                dictionaryLearningEnabled: Bool = true,
+                dictionaryLearningAutoAccept: Bool = false,
+                talkEnabled: Bool = true,
+                agentEnabled: Bool = true,
+                agentAutoConfirm: Bool = false,
+                talkProvider: TalkProviderID = .vertexGemini,
+                talkModel: String = "gemini-3.5-flash",
+                vertexProjectID: String = "",
+                vertexRegion: String = "global",
+                talkVisionEnabled: Bool = false,
+                talkThinkingBudget: Int = 0) {
         self.hotkey = hotkey
         self.engine = engine
         self.formattingEnabled = formattingEnabled
@@ -66,19 +134,35 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.localServerURL = localServerURL
         self.localServerModel = localServerModel
+        self.formatterVertexModel = formatterVertexModel
+        self.dictionaryLearningEnabled = dictionaryLearningEnabled
+        self.dictionaryLearningAutoAccept = dictionaryLearningAutoAccept
+        self.talkEnabled = talkEnabled
+        self.agentEnabled = agentEnabled
+        self.agentAutoConfirm = agentAutoConfirm
+        self.talkProvider = talkProvider
+        self.talkModel = talkModel
+        self.vertexProjectID = vertexProjectID
+        self.vertexRegion = vertexRegion
+        self.talkVisionEnabled = talkVisionEnabled
+        self.talkThinkingBudget = talkThinkingBudget
     }
 
     public static let `default` = AppSettings()
 
     // Lenient decoding: any missing key falls back to its default, so adding a
     // new setting in a future build never wipes the user's saved preferences.
+    //
+    // Enum fields use `try?` rather than `try`: `decodeIfPresent` THROWS on an
+    // unrecognized raw value, and one removed case would otherwise fail the whole
+    // decode and reset every unrelated setting the user had configured.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppSettings.default
-        hotkey = try c.decodeIfPresent(HotkeyChoice.self, forKey: .hotkey) ?? d.hotkey
-        engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? d.engine
+        hotkey = (try? c.decodeIfPresent(HotkeyChoice.self, forKey: .hotkey)) ?? d.hotkey
+        engine = (try? c.decodeIfPresent(EngineID.self, forKey: .engine)) ?? d.engine
         formattingEnabled = try c.decodeIfPresent(Bool.self, forKey: .formattingEnabled) ?? d.formattingEnabled
-        preferredFormatter = try c.decodeIfPresent(FormatterID.self, forKey: .preferredFormatter) ?? d.preferredFormatter
+        preferredFormatter = (try? c.decodeIfPresent(FormatterID.self, forKey: .preferredFormatter)) ?? d.preferredFormatter
         playSounds = try c.decodeIfPresent(Bool.self, forKey: .playSounds) ?? d.playSounds
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
         handsFreeEnabled = try c.decodeIfPresent(Bool.self, forKey: .handsFreeEnabled) ?? d.handsFreeEnabled
@@ -86,6 +170,39 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hasCompletedOnboarding = try c.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? d.hasCompletedOnboarding
         localServerURL = try c.decodeIfPresent(String.self, forKey: .localServerURL) ?? d.localServerURL
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
+        formatterVertexModel = try c.decodeIfPresent(String.self, forKey: .formatterVertexModel) ?? d.formatterVertexModel
+        dictionaryLearningEnabled = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningEnabled) ?? d.dictionaryLearningEnabled
+        dictionaryLearningAutoAccept = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningAutoAccept) ?? d.dictionaryLearningAutoAccept
+        talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
+        agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
+        agentAutoConfirm = try c.decodeIfPresent(Bool.self, forKey: .agentAutoConfirm) ?? d.agentAutoConfirm
+        talkProvider = (try? c.decodeIfPresent(TalkProviderID.self, forKey: .talkProvider)) ?? d.talkProvider
+        talkModel = try c.decodeIfPresent(String.self, forKey: .talkModel) ?? d.talkModel
+        vertexProjectID = try c.decodeIfPresent(String.self, forKey: .vertexProjectID) ?? d.vertexProjectID
+        vertexRegion = try c.decodeIfPresent(String.self, forKey: .vertexRegion) ?? d.vertexRegion
+        talkVisionEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkVisionEnabled) ?? d.talkVisionEnabled
+        talkThinkingBudget = try c.decodeIfPresent(Int.self, forKey: .talkThinkingBudget) ?? d.talkThinkingBudget
+    }
+}
+
+extension AppSettings {
+    /// The learning thresholds, with the user's auto-accept choice folded in.
+    public var learningPolicy: LearningPolicy {
+        LearningPolicy(autoAcceptSpelling: dictionaryLearningAutoAccept)
+    }
+
+    /// Resolve the Talk settings into the provider-facing config. Local-server
+    /// fields double as the fallback target when a cloud provider is unusable, so
+    /// they're always populated regardless of which provider is selected.
+    public var talkConfig: TalkConfig {
+        TalkConfig(
+            provider: talkProvider,
+            model: talkProvider == .vertexGemini ? talkModel : localServerModel,
+            endpoint: localServerURL,
+            projectID: vertexProjectID.isEmpty ? nil : vertexProjectID,
+            region: vertexRegion.isEmpty ? "global" : vertexRegion,
+            thinkingBudget: talkThinkingBudget
+        )
     }
 }
 

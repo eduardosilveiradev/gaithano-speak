@@ -25,9 +25,23 @@ final class AppEnvironment {
     /// The single write path for settings: updates state, persists to disk, and
     /// pushes the change to the coordinator/hotkey.
     func applySettings(_ new: AppSettings) {
+        let wasAutoAccepting = settings.dictionaryLearningAutoAccept
         settings = new
         settingsStore.save(new)
         coordinator.updateSettings(new)
+
+        // Turning auto-accept on has to act on the terms already waiting. Otherwise
+        // the policy change just filters them out of the suggestion list and they sit
+        // there accepted-by-nobody — the user asked for them to be let in.
+        if new.dictionaryLearningAutoAccept && !wasAutoAccepting {
+            for term in (try? database.pendingLearnedTerms(policy: LearningPolicy(autoAcceptSpelling: false))) ?? [] {
+                guard let id = term.id else { continue }
+                try? database.acceptLearnedTerm(id: id)
+            }
+            coordinator.reloadDictionary()
+            refreshDictionary()
+        }
+        refreshLearnedTerms()
     }
 
     /// Mutate one field and persist. Convenience for SwiftUI bindings.
@@ -40,6 +54,9 @@ final class AppEnvironment {
     /// Recent dictations for the history view (refreshed on demand).
     var history: [DictationRecord] = []
     var dictionaryEntries: [DictionaryEntry] = []
+    /// Terms the learner wants a decision on. Spelling substitutions only —
+    /// casing fixes promote themselves and never appear here.
+    var learnedSuggestions: [LearnedTerm] = []
     var stats = AggregateStats()
 
     /// Auto-show the onboarding window only on a genuine first run. Deliberately
@@ -95,12 +112,23 @@ final class AppEnvironment {
             self.overlay.update(state: state, level: self.coordinator.audioLevel,
                                 partial: self.coordinator.livePartial,
                                 arming: self.coordinator.armingProgress,
-                                levels: self.coordinator.levelHistory)
+                                levels: self.coordinator.levelHistory,
+                                mode: self.coordinator.mode,
+                                answerText: self.coordinator.answerText,
+                                showsAnswerPanel: self.coordinator.showsAnswerPanel,
+                                history: self.coordinator.talkHistory,
+                                agent: self.coordinator.agentSession)
         }
         secureWatcher.onChange = { [weak self] active in
             self?.coordinator.setSecureInput(active)
         }
+        coordinator.onLearningChanged = { [weak self] _ in
+            guard let self else { return }
+            self.refreshDictionary()
+            self.refreshLearnedTerms()
+        }
         coordinator.reloadDictionary()
+        refreshLearnedTerms()
     }
 
     /// Start system monitors once permissions are in place.
@@ -118,7 +146,12 @@ final class AppEnvironment {
                     overlay.update(state: coordinator.state, level: coordinator.audioLevel,
                                    partial: coordinator.livePartial,
                                    arming: coordinator.armingProgress,
-                                   levels: coordinator.levelHistory)
+                                   levels: coordinator.levelHistory,
+                                   mode: coordinator.mode,
+                                   answerText: coordinator.answerText,
+                                   showsAnswerPanel: coordinator.showsAnswerPanel,
+                                   history: coordinator.talkHistory,
+                                   agent: coordinator.agentSession)
                     try? await Task.sleep(nanoseconds: 16_666_666) // ~60 fps
                 } else {
                     try? await Task.sleep(nanoseconds: 100_000_000) // idle: light poll
@@ -155,6 +188,33 @@ final class AppEnvironment {
         try? database.deleteDictionaryEntry(id: id)
         coordinator.reloadDictionary()
         refreshDictionary()
+    }
+
+    // MARK: - Learned terms
+
+    func refreshLearnedTerms() {
+        learnedSuggestions = (try? database.pendingLearnedTerms(policy: settings.learningPolicy)) ?? []
+    }
+
+    func acceptLearnedTerm(id: Int64) {
+        try? database.acceptLearnedTerm(id: id)
+        coordinator.reloadDictionary()
+        refreshDictionary()
+        refreshLearnedTerms()
+    }
+
+    func dismissLearnedTerm(id: Int64) {
+        try? database.dismissLearnedTerm(id: id)
+        refreshLearnedTerms()
+    }
+
+    /// Throw away everything learning has built, including the entries it promoted.
+    /// The user's own dictionary entries are untouched.
+    func forgetLearnedTerms() {
+        try? database.forgetLearnedTerms()
+        coordinator.reloadDictionary()
+        refreshDictionary()
+        refreshLearnedTerms()
     }
 
     func deleteDictation(id: Int64) {

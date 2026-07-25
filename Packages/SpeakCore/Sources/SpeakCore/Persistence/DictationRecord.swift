@@ -48,7 +48,9 @@ extension DictionaryEntry: FetchableRecord, MutablePersistableRecord {
             phrase: row["phrase"],
             replacement: row["replacement"],
             matchCase: row["matchCase"],
-            sortOrder: row["sortOrder"]
+            sortOrder: row["sortOrder"],
+            // Rows written before the learning migration have no source.
+            source: (row["source"] as String?).flatMap(DictionaryEntrySource.init(rawValue:)) ?? .manual
         )
     }
 
@@ -58,6 +60,40 @@ extension DictionaryEntry: FetchableRecord, MutablePersistableRecord {
         container["replacement"] = replacement
         container["matchCase"] = matchCase
         container["sortOrder"] = sortOrder
+        container["source"] = source.rawValue
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
+/// Persisted learning candidate.
+extension LearnedTerm: FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "learnedTerm"
+
+    public init(row: Row) {
+        self.init(
+            id: row["id"],
+            phrase: row["phrase"],
+            replacement: row["replacement"],
+            kind: TermObservation.Kind(rawValue: row["kind"]) ?? .spelling,
+            occurrences: row["occurrences"],
+            firstSeen: row["firstSeen"],
+            lastSeen: row["lastSeen"],
+            state: State(rawValue: row["state"]) ?? .pending
+        )
+    }
+
+    public func encode(to container: inout PersistenceContainer) {
+        container["id"] = id
+        container["phrase"] = phrase
+        container["replacement"] = replacement
+        container["kind"] = kind.rawValue
+        container["occurrences"] = occurrences
+        container["firstSeen"] = firstSeen
+        container["lastSeen"] = lastSeen
+        container["state"] = state.rawValue
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {

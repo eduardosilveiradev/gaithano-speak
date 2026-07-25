@@ -50,6 +50,26 @@ enum PermissionsService {
         }
     }
 
+    /// Screen Recording, needed only for Talk's optional vision context. Not part of
+    /// `allEssentialGranted` — dictation works fine without it.
+    static var screenRecordingGranted: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    /// Trigger the system prompt. Returns whether access was already granted; macOS
+    /// only shows the prompt once per app, and the grant needs a relaunch to take
+    /// effect, so callers should treat `false` as "ask the user to check Settings".
+    @discardableResult
+    static func requestScreenRecording() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+
+    static func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     static var allEssentialGranted: Bool {
         microphoneGranted && accessibilityGranted
     }
