@@ -79,12 +79,8 @@ struct FlowBarView: View {
                     if let agent { agentSteps(agent) }
 
                     if !answerText.isEmpty {
-                        Text(answerText)
-                            .font(.system(size: 13, weight: .regular))
+                        MarkdownText(source: answerText)
                             .foregroundStyle(.white.opacity(followUpActive ? 0.45 : 1))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     // Newest first, directly under the current answer — scrolling down
@@ -154,12 +150,20 @@ struct FlowBarView: View {
                     Text(turn.role == .user ? "you" : "reply")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.3))
-                    Text(turn.text)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(turn.role == .user ? 0.5 : 0.38))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // Only replies get the markdown pass. A user turn is a transcript
+                    // of speech, so its asterisks and hashes are words the user said.
+                    Group {
+                        if turn.role == .user {
+                            Text(turn.text)
+                                .font(.system(size: 12))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            MarkdownText(source: turn.text, size: 12)
+                        }
+                    }
+                    .foregroundStyle(.white.opacity(turn.role == .user ? 0.5 : 0.38))
                 }
             }
         }

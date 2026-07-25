@@ -64,6 +64,13 @@ final class RecordingCoordinator {
     private var currentRaw = ""
     private var currentFinal = ""
     private var currentFormatter: FormatterID = .deterministic
+    /// The model's own edit, captured mid-`format` and consumed at `.persist`.
+    ///
+    /// It has to be taken *there* and not reconstructed later: the dictionary
+    /// post-pass and `TextRepair` both run afterwards, and those are this app's
+    /// edits, not the model's. Learning from them would teach the dictionary its
+    /// own output.
+    private var pendingLearning: (heard: String, written: String)?
     private var recordingStartedAt: Date?
     private var currentDuration: TimeInterval = 0
 
@@ -281,12 +288,19 @@ final class RecordingCoordinator {
         case .playStopSound:
             if settings.playSounds { NSSound(named: "Pop")?.play() }
         case let .answer(question):
-            // Same reasoning as `.format`: transcription is done, nothing downstream
-            // needs the mic, so give other apps their audio back now.
-            media.resumeIfPaused()
+            // Deliberately *not* resuming here, unlike `.format`. Asking is a thing you
+            // wait through and then read; handing the music back the instant the mic
+            // closes means it returns while the model is still thinking, and on a short
+            // question the quiet window is brief enough to read as "it never paused".
+            // The `.answering` → `.answerPresented` transition resumes it instead, so
+            // the window covers the whole ask and still can't outlive it.
             currentRaw = question
             answer(question)
         case let .runAgent(task):
+            // The agent does resume now, and for the opposite reason: its
+            // `.answerPresented` doesn't arrive until the entire run ends — many steps,
+            // possibly parked on a confirmation the user hasn't answered. Waiting for
+            // that would leave the music off for minutes.
             media.resumeIfPaused()
             currentRaw = task
             runAgent(task)
@@ -312,6 +326,7 @@ final class RecordingCoordinator {
         cancelTimers()
         pendingSamples = []
         currentRaw = ""; currentFinal = ""
+        pendingLearning = nil
         livePartial = ""
         // Pre-fill the waveform buffer so it spans the pill immediately instead of
         // visibly "filling up" like a progress bar.
@@ -323,8 +338,10 @@ final class RecordingCoordinator {
         if settings.formattingEnabled && settings.preferredFormatter == .foundationModel {
             formatter.prewarm()
         }
-        // Warm the output-level tap so, by the time we decide whether to pause other
-        // apps' audio (at commit, 0.5s from now), we have a real reading. Prompts for
+        // Start the output-level tap as early as possible. With `minHold` at 0 the
+        // pause decision lands on the very next hop, well before the tap's first
+        // buffer, so `MediaPlaybackController` waits for a real reading rather than
+        // deciding on a cold 0 — this call only gives it a head start. Prompts for
         // the audio-capture permission on first use.
         if settings.pauseAudioWhileListening {
             media.beginMonitoring()
@@ -454,6 +471,11 @@ final class RecordingCoordinator {
                         result = try await vertexFormatter.format(text, hints: hints, config: config)
                     } else {
                         result = try await formatter.format(text, hints: hints)
+                    }
+                    // Snapshot the pair before anything else touches it. `text` here
+                    // is still exactly what the model was handed.
+                    if settings.dictionaryLearningEnabled {
+                        self.pendingLearning = (heard: text, written: result.text)
                     }
                     text = result.text
                     used = result.formatter
@@ -692,7 +714,41 @@ final class RecordingCoordinator {
         )
         do { try database.save(record) }
         catch { Log.coordinator.error("Persist failed: \(error.localizedDescription, privacy: .public)") }
+
+        learnFromLastFormat()
     }
+
+    /// Turn the model's corrections into dictionary candidates.
+    ///
+    /// Deliberately after insertion: the text is already on screen, so the diff, the
+    /// write, and the dictionary reload all happen on time the user isn't waiting on.
+    private func learnFromLastFormat() {
+        guard settings.dictionaryLearningEnabled, let pair = pendingLearning else { return }
+        pendingLearning = nil
+
+        let observations = DictionaryLearner.observe(heard: pair.heard, written: pair.written)
+        guard !observations.isEmpty else { return }
+
+        let database = self.database
+        let policy = settings.learningPolicy
+        Task { @MainActor [weak self] in
+            let outcome = await Task.detached(priority: .utility) { () -> LearningOutcome? in
+                try? database.learn(from: observations, policy: policy)
+            }.value
+
+            guard let self, let outcome, !outcome.isEmpty else { return }
+            for entry in outcome.accepted {
+                Log.coordinator.info("Learned \(entry.phrase, privacy: .private) → \(entry.replacement, privacy: .private)")
+            }
+            // A newly promoted entry has to be live for the *next* dictation, so
+            // reload here rather than waiting for someone to open Settings.
+            if !outcome.accepted.isEmpty { self.reloadDictionary() }
+            self.onLearningChanged?(outcome)
+        }
+    }
+
+    /// Set by `AppEnvironment` so Settings can show what was learned or is waiting.
+    var onLearningChanged: ((LearningOutcome) -> Void)?
 
     // MARK: - Helpers
 

@@ -41,3 +41,11 @@ pasteboard, and cross-app focus — none of which CI can honestly exercise.
 - [ ] History window lists dictations with raw/formatted toggle, copy, delete; stats update
 - [ ] Add a dictionary rule (e.g. "gaithano" → "Gaithano"); dictate it; replacement applied
 - [ ] Quit and relaunch → history + dictionary + settings persist
+
+## Dictionary learning
+- [ ] Dictate a sentence containing a term the formatter capitalises (e.g. "we shipped the parakeet engine") three times → the rule appears in Dictionary with a ✦ marker, and the fourth dictation is already correct before the model runs
+- [ ] Dictate a spelled-out acronym twice ("the gee are dee bee layer") → it appears under **Suggested**, not in the list; "Add" moves it down, "No" removes it and it never returns however often you say it
+- [ ] Turn on "Add new spellings without asking" while a suggestion is waiting → it moves into the dictionary immediately
+- [ ] Dictate ordinary sentences with grammar the model fixes (there/their, its/it's) → nothing is ever learned
+- [ ] "Forget everything learned" removes ✦ entries and leaves hand-typed ones untouched
+- [ ] Turn the toggle off → no new suggestions accumulate; existing entries keep working

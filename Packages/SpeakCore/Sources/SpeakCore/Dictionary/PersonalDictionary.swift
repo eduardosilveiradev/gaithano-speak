@@ -1,5 +1,13 @@
 import Foundation
 
+/// Where a dictionary entry came from.
+public enum DictionaryEntrySource: String, Codable, Sendable, CaseIterable {
+    /// The user typed it in.
+    case manual
+    /// `DictionaryLearner` picked it up from the formatter's own corrections.
+    case learned
+}
+
 /// A single spoken-phrase → replacement rule.
 public struct DictionaryEntry: Equatable, Sendable, Identifiable, Codable {
     public var id: Int64?
@@ -10,13 +18,22 @@ public struct DictionaryEntry: Equatable, Sendable, Identifiable, Codable {
     /// When true, matching is case-sensitive; otherwise case-insensitive.
     public var matchCase: Bool
     public var sortOrder: Int
+    /// Manual or learned. Only affects presentation — the pipeline treats both the
+    /// same — but the user has to be able to tell which rules they didn't write.
+    public var source: DictionaryEntrySource
 
-    public init(id: Int64? = nil, phrase: String, replacement: String, matchCase: Bool = false, sortOrder: Int = 0) {
+    public init(id: Int64? = nil,
+                phrase: String,
+                replacement: String,
+                matchCase: Bool = false,
+                sortOrder: Int = 0,
+                source: DictionaryEntrySource = .manual) {
         self.id = id
         self.phrase = phrase
         self.replacement = replacement
         self.matchCase = matchCase
         self.sortOrder = sortOrder
+        self.source = source
     }
 }
 
