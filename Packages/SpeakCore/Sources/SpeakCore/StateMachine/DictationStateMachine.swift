@@ -416,6 +416,13 @@ public struct DictationStateMachine: Sendable {
             if trimmed.isEmpty {
                 return abandonUtterance(notice: .noSpeech)
             }
+            // An ASR model handed silence returns its best short guess, not "". Those
+            // guesses are fine to type and never fine to act on, so the gate stops
+            // here for the modes that hand the transcript to a model with tools —
+            // see `UtteranceGate` for why dictation is exempt.
+            if mode != .dictate && !UtteranceGate.isSubstantive(trimmed) {
+                return abandonUtterance(notice: .noSpeech)
+            }
             // The one place the two modes diverge.
             switch mode {
             case .dictate:

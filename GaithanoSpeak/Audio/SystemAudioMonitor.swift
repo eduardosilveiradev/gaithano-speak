@@ -18,10 +18,19 @@ final class SystemAudioMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var _level: Float = 0
     private var _running = false
+    private var _samples = 0
 
     /// Most recent output RMS (0…~1). Thread-safe.
     var level: Float { lock.lock(); defer { lock.unlock() }; return _level }
     var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return _running }
+
+    /// How many IOProc buffers have landed since `start()`.
+    ///
+    /// `level` alone can't distinguish "nothing is playing" from "the tap hasn't
+    /// handed us anything yet" — both read 0. A caller deciding whether to pause
+    /// other apps needs to tell those apart, because acting on a cold tap means
+    /// never pausing anything.
+    var sampleCount: Int { lock.lock(); defer { lock.unlock() }; return _samples }
 
     /// Above this RMS we consider audio to be genuinely playing. Empirically well
     /// above the noise floor of a silent-but-active device (which reads ~0).
@@ -82,6 +91,7 @@ final class SystemAudioMonitor: @unchecked Sendable {
             self.lock.lock()
             // Short peak-hold so momentary gaps between callbacks don't read as silence.
             self._level = max(rms, self._level * 0.7)
+            self._samples += 1
             self.lock.unlock()
         }
         guard status == noErr, let pid else {
@@ -97,7 +107,7 @@ final class SystemAudioMonitor: @unchecked Sendable {
 
     func stop() {
         teardown()
-        lock.lock(); _level = 0; _running = false; lock.unlock()
+        lock.lock(); _level = 0; _running = false; _samples = 0; lock.unlock()
     }
 
     private func teardown() {

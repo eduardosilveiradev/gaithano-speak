@@ -68,6 +68,14 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 **Cursor-context merging.** `AccessibilityContext.focusedTextContext()` reads text around the caret via AX and feeds it to the prompt so dictation continues a half-finished sentence cleanly. Many Electron/web apps expose nothing — every path must degrade gracefully to nil, falling back to `TextRepair.appendSeparatorSpace`.
 
+**The dictionary learns from the formatter, and the gates are the feature.** `DictionaryLearner.observe(heard:written:)` LCS-aligns the text handed to the model against the text it returned, and proposes dictionary entries from the differences. The point is that the model fixes proper nouns *with sentence context* the dictionary pass can never see — recording those fixes makes them permanent, and makes them work on the short-utterance and offline paths where the model never runs.
+
+Almost everything a formatter changes is grammar, and grammar is not vocabulary. A candidate has to clear **both** gates: `looksLikeTerm` (internal capital, a digit, or internal/leading punctuation — which keeps `GRDB`/`CoreML`/`GPT-4`/`.NET` and rejects `Their`) **and** `Phonetics.areClose` (consonant skeleton, digits expanded to their spoken words). Sentence-initial capitals are excluded from the casing path because every word can have one. More than `maxPerUtterance` candidates means the model paraphrased rather than corrected, and the whole batch is discarded. Loosening either gate is how this feature starts silently corrupting dictations: a wrong entry reads as correct to the person who meant to say it.
+
+Casing fixes promote themselves at `casingThreshold`; spelling fixes only ever *suggest*, unless the user opts into `dictionaryLearningAutoAccept`. A dismissal is permanent — `LearningPolicy.decision` returns `.hold` for any non-`.pending` state, so nothing already settled is ever re-counted or re-offered.
+
+Capture the pair inside `format(_:)`, at the moment the model returns, and nowhere else: the dictionary post-pass and `TextRepair` run afterwards, and learning from those would teach the dictionary its own output. `learnFromLastFormat()` runs at `.persist`, after insertion, so none of it is on the latency path.
+
 **Insertion strategy.** `SmartInserter` types short strings (≤12 chars, no clipboard clobber) and pastes longer ones via synthesized ⌘V. `PasteboardInserter` snapshots and restores the user's clipboard, and skips restoring if `changeCount` shows someone else grabbed it.
 
 **`PromptBuilder.instructions` is a prompt-cache key.** It lives in SpeakCore and is unit-tested so its exact wording stays stable. It also hard-instructs the model to never answer or act on transcript content — preserve that boundary when editing.

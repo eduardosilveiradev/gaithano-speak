@@ -57,6 +57,33 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Dictionary") {
+                Toggle("Learn terms from corrections", isOn: bind(\.dictionaryLearningEnabled))
+                Text("When the formatter fixes the same name or acronym a few times, it becomes a dictionary entry — so the fix happens instantly next time, even on short utterances and when the model isn’t running.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if environment.settings.dictionaryLearningEnabled {
+                    Toggle("Add new spellings without asking", isOn: bind(\.dictionaryLearningAutoAccept))
+                    // The honest version of what this trades away. Capitalisation is
+                    // visible when it's wrong; a swapped word reads as correct to the
+                    // person who meant to say it.
+                    Text(environment.settings.dictionaryLearningAutoAccept
+                         ? "Words that change spelling — “gee are dee bee” → “GRDB” — are added on their own. A wrong one will keep replacing that word until you delete it in Dictionary."
+                         : "Capitalisation fixes are added on their own. Anything that changes a word’s spelling waits for you in Dictionary.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    if !environment.learnedSuggestions.isEmpty {
+                        Text("^[\(environment.learnedSuggestions.count) suggestion](inflect: true) waiting in Dictionary.")
+                            .font(.caption)
+                    }
+
+                    Button("Forget everything learned") {
+                        environment.forgetLearnedTerms()
+                    }
+                    .help("Removes learned entries and starts counting from scratch. Entries you added yourself are kept.")
+                }
+            }
+
             Section("Talk") {
                 Toggle("Hold Control while speaking to ask a model", isOn: bind(\.talkEnabled))
                 Text("⌃⌥ instead of ⌥: your words go to a model and the answer appears in a panel instead of being typed. ⌘C copies it, ⌘↩ inserts it, esc closes.")
