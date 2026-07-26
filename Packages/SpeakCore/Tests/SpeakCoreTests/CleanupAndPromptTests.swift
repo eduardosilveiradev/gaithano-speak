@@ -271,6 +271,14 @@ struct PromptContextTests {
         #expect(PromptBuilder.instructions.contains("Duplicated words"))
     }
 
+    /// Parakeet hands over near-uncased text, so casing is the formatter's job and
+    /// the instruction has to be explicit about it — not a clause on a punctuation line.
+    @Test("Instructions spell out capitalization")
+    func instructionsCoverCapitalization() {
+        #expect(PromptBuilder.instructions.contains("Capitalize the first word of every sentence"))
+        #expect(PromptBuilder.instructions.contains("Never return all-lowercase text"))
+    }
+
     @Test("Preceding text is injected for merge")
     func precedingInjected() {
         let prompt = PromptBuilder.prompt(for: "and then we left",

@@ -20,7 +20,11 @@ public enum PromptBuilder {
         - Run-on sentences: split them; sentence fragments: complete them.
         - Filler words (um, uh, er, like, you know) and false starts — remove them.
         - Duplicated words and stutters: "the the" -> "the", "I I think" -> "I think".
-        - Add natural punctuation and capitalization.
+        - Add natural punctuation.
+        - Capitalization: the transcript arrives with little or no capitalization, so \
+        apply it yourself. Capitalize the first word of every sentence, the pronoun \
+        "I", and proper nouns — names, places, companies, products, languages, days, \
+        months. Never return all-lowercase text.
 
         Examples (input -> output):
         - "me and him was gonna go to the store but we didnt had time" -> \
