@@ -334,7 +334,26 @@ struct TalkSettingsTests {
         let config = settings.talkConfig
         #expect(config.projectID == nil)
         #expect(config.region == "global")
-        #expect(config.model == "gemini-3.5-flash")
+        #expect(config.model == "gemini-3.6-flash")
         #expect(config.thinkingBudget == 0)
+    }
+
+    /// Bumping the default in `init` is invisible to anyone with saved settings — the
+    /// whole struct is persisted, so the old default comes back out of the store.
+    /// A value the user typed themselves must survive untouched.
+    @Test("A saved superseded model id is upgraded, a custom one is not")
+    func supersededModelUpgrades() {
+        let defaults = UserDefaults(suiteName: "superseded-model-test")!
+        defaults.removePersistentDomain(forName: "superseded-model-test")
+        let store = SettingsStore(defaults: defaults)
+
+        var settings = AppSettings.default
+        settings.talkModel = "gemini-3.5-flash"
+        settings.formatterVertexModel = "gemini-2.5-pro"   // deliberately pinned
+        store.save(settings)
+
+        let loaded = store.load()
+        #expect(loaded.talkModel == "gemini-3.6-flash")
+        #expect(loaded.formatterVertexModel == "gemini-2.5-pro")
     }
 }

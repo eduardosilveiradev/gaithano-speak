@@ -86,7 +86,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// `autoConfirm`, and that ordering is not negotiable.
     public var agentAutoConfirm: Bool
     public var talkProvider: TalkProviderID
-    /// Model id for the Talk provider. Vertex default is `gemini-3.5-flash`.
+    /// Model id for the Talk provider. Vertex default is `gemini-3.6-flash`.
     public var talkModel: String
     /// GCP project for Vertex. Empty falls back to the project gcloud's Application
     /// Default Credentials were set up against, so the usual case needs no setup.
@@ -111,14 +111,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 hasCompletedOnboarding: Bool = false,
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
-                formatterVertexModel: String = "gemini-3.5-flash",
+                formatterVertexModel: String = "gemini-3.6-flash",
                 dictionaryLearningEnabled: Bool = true,
                 dictionaryLearningAutoAccept: Bool = false,
                 talkEnabled: Bool = true,
                 agentEnabled: Bool = true,
                 agentAutoConfirm: Bool = false,
                 talkProvider: TalkProviderID = .vertexGemini,
-                talkModel: String = "gemini-3.5-flash",
+                talkModel: String = "gemini-3.6-flash",
                 vertexProjectID: String = "",
                 vertexRegion: String = "global",
                 talkVisionEnabled: Bool = false,
@@ -217,10 +217,24 @@ public struct SettingsStore: @unchecked Sendable {
         self.defaults = defaults
     }
 
+    /// Vertex model ids that a previous build shipped as the default, mapped to what
+    /// replaces them. Bumping the default in `init` alone changes nothing for anyone
+    /// who has ever opened Settings — the whole struct is persisted, so the old
+    /// default is sitting in their saved JSON. Only a value that still matches the
+    /// superseded default is rewritten; anything the user typed themselves is left
+    /// exactly as they typed it.
+    static let supersededVertexModels = ["gemini-3.5-flash": "gemini-3.6-flash"]
+
     public func load() -> AppSettings {
         guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+              var decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
             return .default
+        }
+        if let newer = Self.supersededVertexModels[decoded.talkModel] {
+            decoded.talkModel = newer
+        }
+        if let newer = Self.supersededVertexModels[decoded.formatterVertexModel] {
+            decoded.formatterVertexModel = newer
         }
         return decoded
     }
