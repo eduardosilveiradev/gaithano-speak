@@ -334,7 +334,57 @@ struct TalkSettingsTests {
         let config = settings.talkConfig
         #expect(config.projectID == nil)
         #expect(config.region == "global")
-        #expect(config.model == "gemini-3.5-flash")
+        #expect(config.model == "gemini-3.6-flash")
         #expect(config.thinkingBudget == 0)
+    }
+
+    /// Bumping the default in `init` is invisible to anyone with saved settings — the
+    /// whole struct is persisted, so the old default comes back out of the store.
+    /// A value the user typed themselves must survive untouched.
+    @Test("A saved superseded model id is upgraded, a custom one is not")
+    func supersededModelUpgrades() {
+        let defaults = UserDefaults(suiteName: "superseded-model-test")!
+        defaults.removePersistentDomain(forName: "superseded-model-test")
+        let store = SettingsStore(defaults: defaults)
+
+        var settings = AppSettings.default
+        settings.talkModel = "gemini-3.5-flash"
+        settings.localServerModel = "gemma-2-2b"   // deliberately pinned
+        store.save(settings)
+
+        let loaded = store.load()
+        #expect(loaded.talkModel == "gemini-3.6-flash")
+        #expect(loaded.localServerModel == "gemma-2-2b")
+    }
+
+    /// The Vertex formatter is gone, but its raw value is still sitting in the saved
+    /// JSON of anyone who selected it. They chose a cloud model over the on-device
+    /// one; dropping them back to `.foundationModel` would silently undo that choice.
+    @Test("A saved Vertex formatter choice migrates to the Claude CLI")
+    func vertexFormatterMigratesToClaude() {
+        let defaults = UserDefaults(suiteName: "vertex-formatter-migration-test")!
+        defaults.removePersistentDomain(forName: "vertex-formatter-migration-test")
+        let store = SettingsStore(defaults: defaults)
+
+        var settings = AppSettings.default
+        settings.preferredFormatter = .vertexGemini
+        store.save(settings)
+
+        #expect(store.load().preferredFormatter == .claude)
+    }
+
+    /// Only that one value moves — a formatter the user picked for itself is theirs.
+    @Test("Other formatter choices survive the migration untouched")
+    func otherFormattersSurviveMigration() {
+        let defaults = UserDefaults(suiteName: "formatter-migration-noop-test")!
+        defaults.removePersistentDomain(forName: "formatter-migration-noop-test")
+        let store = SettingsStore(defaults: defaults)
+
+        for formatter in [FormatterID.foundationModel, .localServer, .deterministic, .claude] {
+            var settings = AppSettings.default
+            settings.preferredFormatter = formatter
+            store.save(settings)
+            #expect(store.load().preferredFormatter == formatter)
+        }
     }
 }

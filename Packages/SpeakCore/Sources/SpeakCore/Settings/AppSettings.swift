@@ -43,10 +43,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// tokens per format, which dominates latency for a few words of dictation.
     public var localServerModel: String
 
-    /// Model id for the Vertex formatter. Separate from `talkModel` so the two can be
-    /// tuned independently — formatting wants the cheapest model that punctuates well,
-    /// while Talk answers questions and benefits from a stronger one.
-    public var formatterVertexModel: String
+    /// Model passed to `claude --model` for the `.claude` formatter. Separate from
+    /// `talkModel` so the two can be tuned independently.
+    ///
+    /// Sonnet, not Haiku, and the reason is instruction-following rather than prose
+    /// quality. With thinking disabled — which is what makes this formatter usable at
+    /// all — Haiku broke two of the prompt's subtler rules in one sitting: it refused a
+    /// transcript that read as a command instead of punctuating it, and it trimmed the
+    /// opening words off dictations that continue existing text. Sonnet handles both,
+    /// plus the stutter-across-a-pause dedup Haiku still misses, for about 0.8s more.
+    /// Running on a subscription, the extra tokens are plan usage rather than money.
+    /// Set it to `haiku` if latency ever matters more than the edges.
+    public var formatterClaudeModel: String
+    /// Explicit path to the `claude` binary. Blank auto-detects the usual install
+    /// locations, which is the whole point: a GUI app launched by launchd inherits a
+    /// bare PATH, so `claude` is never simply "on the path" the way it is in a shell.
+    public var formatterClaudePath: String
 
     // MARK: Dictionary learning
 
@@ -85,8 +97,30 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// field has focus) are still refused — `AgentSession` checks those ahead of
     /// `autoConfirm`, and that ordering is not negotiable.
     public var agentAutoConfirm: Bool
+    /// Point ⌃⌥ at a running Claude Code session instead of a model of ours: the
+    /// utterance is typed into the terminal hosting it rather than answered.
+    ///
+    /// Outranks `agentEnabled`, so with this on there is no way to reach the agent or
+    /// a plain question — one gesture, one destination. On by default because it's the
+    /// gesture's owner who asked for it, and because it is the only ⌃⌥ path that keeps
+    /// working when Vertex doesn't. There is deliberately no fallback: if no Claude
+    /// Code session can be found the utterance fails with a notice rather than quietly
+    /// going to a model the user didn't choose.
+    public var claudeCodeHandoffEnabled: Bool
+    /// Press Return after typing, so the prompt is submitted rather than left sitting
+    /// in the composer.
+    ///
+    /// On by default — "paste it and let me look at it" is a different feature from
+    /// "say it and it runs", and the second is what the gesture is for. Turn it off to
+    /// get a chance to read the transcript before Claude Code acts on it.
+    public var claudeCodeSubmitOnPaste: Bool
+    /// Bundle id of the app hosting the session, e.g. `dev.warp.Warp-Stable`. Blank
+    /// auto-detects by walking up from a running `claude` process to whichever GUI app
+    /// launched it, which is right often enough that this is an escape hatch, not a
+    /// setup step.
+    public var claudeCodeAppBundleID: String
     public var talkProvider: TalkProviderID
-    /// Model id for the Talk provider. Vertex default is `gemini-3.5-flash`.
+    /// Model id for the Talk provider. Vertex default is `gemini-3.6-flash`.
     public var talkModel: String
     /// GCP project for Vertex. Empty falls back to the project gcloud's Application
     /// Default Credentials were set up against, so the usual case needs no setup.
@@ -111,14 +145,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 hasCompletedOnboarding: Bool = false,
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
-                formatterVertexModel: String = "gemini-3.5-flash",
+                formatterClaudeModel: String = "sonnet",
+                formatterClaudePath: String = "",
                 dictionaryLearningEnabled: Bool = true,
                 dictionaryLearningAutoAccept: Bool = false,
                 talkEnabled: Bool = true,
                 agentEnabled: Bool = true,
                 agentAutoConfirm: Bool = false,
+                claudeCodeHandoffEnabled: Bool = true,
+                claudeCodeSubmitOnPaste: Bool = true,
+                claudeCodeAppBundleID: String = "",
                 talkProvider: TalkProviderID = .vertexGemini,
-                talkModel: String = "gemini-3.5-flash",
+                talkModel: String = "gemini-3.6-flash",
                 vertexProjectID: String = "",
                 vertexRegion: String = "global",
                 talkVisionEnabled: Bool = false,
@@ -134,12 +172,16 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.localServerURL = localServerURL
         self.localServerModel = localServerModel
-        self.formatterVertexModel = formatterVertexModel
+        self.formatterClaudeModel = formatterClaudeModel
+        self.formatterClaudePath = formatterClaudePath
         self.dictionaryLearningEnabled = dictionaryLearningEnabled
         self.dictionaryLearningAutoAccept = dictionaryLearningAutoAccept
         self.talkEnabled = talkEnabled
         self.agentEnabled = agentEnabled
         self.agentAutoConfirm = agentAutoConfirm
+        self.claudeCodeHandoffEnabled = claudeCodeHandoffEnabled
+        self.claudeCodeSubmitOnPaste = claudeCodeSubmitOnPaste
+        self.claudeCodeAppBundleID = claudeCodeAppBundleID
         self.talkProvider = talkProvider
         self.talkModel = talkModel
         self.vertexProjectID = vertexProjectID
@@ -170,12 +212,16 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hasCompletedOnboarding = try c.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? d.hasCompletedOnboarding
         localServerURL = try c.decodeIfPresent(String.self, forKey: .localServerURL) ?? d.localServerURL
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
-        formatterVertexModel = try c.decodeIfPresent(String.self, forKey: .formatterVertexModel) ?? d.formatterVertexModel
+        formatterClaudeModel = try c.decodeIfPresent(String.self, forKey: .formatterClaudeModel) ?? d.formatterClaudeModel
+        formatterClaudePath = try c.decodeIfPresent(String.self, forKey: .formatterClaudePath) ?? d.formatterClaudePath
         dictionaryLearningEnabled = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningEnabled) ?? d.dictionaryLearningEnabled
         dictionaryLearningAutoAccept = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningAutoAccept) ?? d.dictionaryLearningAutoAccept
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
         agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
         agentAutoConfirm = try c.decodeIfPresent(Bool.self, forKey: .agentAutoConfirm) ?? d.agentAutoConfirm
+        claudeCodeHandoffEnabled = try c.decodeIfPresent(Bool.self, forKey: .claudeCodeHandoffEnabled) ?? d.claudeCodeHandoffEnabled
+        claudeCodeSubmitOnPaste = try c.decodeIfPresent(Bool.self, forKey: .claudeCodeSubmitOnPaste) ?? d.claudeCodeSubmitOnPaste
+        claudeCodeAppBundleID = try c.decodeIfPresent(String.self, forKey: .claudeCodeAppBundleID) ?? d.claudeCodeAppBundleID
         talkProvider = (try? c.decodeIfPresent(TalkProviderID.self, forKey: .talkProvider)) ?? d.talkProvider
         talkModel = try c.decodeIfPresent(String.self, forKey: .talkModel) ?? d.talkModel
         vertexProjectID = try c.decodeIfPresent(String.self, forKey: .vertexProjectID) ?? d.vertexProjectID
@@ -217,10 +263,28 @@ public struct SettingsStore: @unchecked Sendable {
         self.defaults = defaults
     }
 
+    /// Vertex model ids that a previous build shipped as the default, mapped to what
+    /// replaces them. Bumping the default in `init` alone changes nothing for anyone
+    /// who has ever opened Settings — the whole struct is persisted, so the old
+    /// default is sitting in their saved JSON. Only a value that still matches the
+    /// superseded default is rewritten; anything the user typed themselves is left
+    /// exactly as they typed it.
+    static let supersededVertexModels = ["gemini-3.5-flash": "gemini-3.6-flash"]
+
     public func load() -> AppSettings {
         guard let data = defaults.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+              var decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
             return .default
+        }
+        if let newer = Self.supersededVertexModels[decoded.talkModel] {
+            decoded.talkModel = newer
+        }
+        // The Vertex formatter was replaced by the Claude CLI. Anyone who had it
+        // selected wanted a cloud model doing their grammar, so move them to the one
+        // that still exists rather than dropping them back to the on-device default —
+        // which is exactly the formatter they'd already rejected.
+        if decoded.preferredFormatter == .vertexGemini {
+            decoded.preferredFormatter = .claude
         }
         return decoded
     }

@@ -6,14 +6,21 @@ is typed into whatever app you're in. No subscription.
 
 - **On-device STT** — NVIDIA Parakeet TDT v3 via [FluidAudio](https://github.com/FluidInference/FluidAudio) (CoreML/ANE).
 - **On-device formatting** — Apple Intelligence (Foundation Models) cleans fillers, punctuation, and casing; falls back to deterministic cleanup when unavailable.
-- **Talk mode** — hold ⌃⌥ instead of ⌥ and your words go to a model for a quick answer, shown in a panel rather than typed. ⌘C copies it, ⌘↩ inserts it, esc closes.
-- **Private by default** — dictation is entirely on-device: audio and text never leave the machine.
+- **Claude Code handoff** — hold ⌃⌥ instead of ⌥ and your words are typed straight into the terminal running Claude Code and submitted. It finds the session by walking the process tree, so any terminal works and there's nothing to configure.
+- **Talk mode** — turn the handoff off and ⌃⌥ asks a model instead, with the answer in a panel rather than typed. ⌘C copies it, ⌘↩ inserts it, esc closes.
+- **Private by default** — audio never leaves the machine, and with the default formatter neither does the text.
 
-### What Talk sends
+### What leaves your Mac
 
-Talk is the one feature that can leave your Mac, so it's worth being precise:
+Two things can send your words off the machine, and both are choices you make:
 
-- **Dictation never leaves the machine.** Nothing below applies unless you hold Control.
+- **Audio never leaves, ever.** Transcription is on-device, full stop.
+- **Dictation text stays on-device unless you pick the Claude CLI formatter.**
+  Choosing it in Settings → Formatting sends every utterance — in every app — to
+  Anthropic to be punctuated, and the CLI keeps a copy of each one on disk under
+  `~/.claude`. Expect two to five seconds per dictation, billed against your Claude
+  plan's usage. The other three formatters never leave your Mac.
+- **Talk (⌃⌥) sends what you ask.** Nothing below applies unless you hold Control.
 - With the default **Vertex AI** provider, a Talk question sends your transcribed
   words, any text you had selected, and the name of the frontmost app to Google.
 - **Vision is off by default.** Turning it on additionally uploads a screenshot of

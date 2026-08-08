@@ -21,6 +21,16 @@ public enum UtteranceMode: Equatable, Sendable {
     /// tools. It is a separate mode rather than a flag on `.talk` because the
     /// difference is not cosmetic — one reads the screen, the other changes it.
     case agent
+    /// Control+Option, when the user has pointed that gesture at Claude Code —
+    /// transcribe, then type the words into the terminal running a Claude Code
+    /// session and (optionally) submit them.
+    ///
+    /// No model of ours ever sees the text, so there is no answer, no panel, and no
+    /// thread: this mode's whole job is to deliver the utterance somewhere else and
+    /// get out of the way. It takes the same gesture as `.talk`/`.agent` because it
+    /// is the same intent — "this sentence is for a model, not for the cursor" — just
+    /// with a different model on the other end.
+    case handoff
 }
 
 /// Which async stage of processing is in flight.
@@ -120,6 +130,10 @@ public enum DictationEvent: Equatable, Sendable {
     case formatReady(String)
     case insertFinished
     case insertFailed
+    /// The Claude Code handoff couldn't deliver. Separate from `.insertFailed` only
+    /// so the reason reaches the user: "no session found" is fixable and "couldn't
+    /// insert" isn't, and they arrive by the same door.
+    case handoffFailed(String)
     case secureInputChanged(Bool)
     /// Control joined Option — this utterance is a Talk question, not dictation.
     /// May arrive at `optionDown` (Control already held) or mid-capture (Control
@@ -130,6 +144,11 @@ public enum DictationEvent: Equatable, Sendable {
     /// never downgraded back to `.talk`, so letting go of Shift mid-sentence can't
     /// quietly turn an approved action run into something else.
     case agentModifierEngaged
+    /// Control joined Option and the user has pointed that gesture at Claude Code.
+    /// Sticky like the other two, and it outranks them: the coordinator only emits
+    /// one of the three, but the reducer refuses the demotion anyway so an ordering
+    /// change upstream can't quietly turn a handoff into an agent run.
+    case handoffModifierEngaged
     /// A provider finished streaming an answer. The answer text itself never passes
     /// through the reducer — it streams onto the coordinator, like `livePartial`.
     case answerReady
@@ -160,6 +179,10 @@ public enum Effect: Equatable, Sendable {
     case answer(String)
     /// Hand the transcript to the agent runner, which will act on the screen.
     case runAgent(String)
+    /// Type the transcript into the terminal running Claude Code. Carries the raw
+    /// transcript; the coordinator cleans it on the way out — see
+    /// `RecordingCoordinator.handOff(_:)` for why the model formatter is skipped.
+    case handOffToClaudeCode(String)
     /// Take the answer panel off screen (visual only — the thread survives, so a
     /// follow-up question can continue the conversation).
     case hideAnswerPanel
@@ -251,11 +274,17 @@ public struct DictationStateMachine: Sendable {
         if case .talkModifierEngaged = event {
             // Never demote an already-upgraded utterance: Control and Shift arrive as
             // separate events, so a Control that lands after Shift must not undo it.
-            if state.isRecording, mode != .agent { mode = .talk }
+            if state.isRecording, mode != .agent, mode != .handoff { mode = .talk }
             return []
         }
         if case .agentModifierEngaged = event {
-            if state.isRecording { mode = .agent }
+            // Handoff outranks the agent. The coordinator emits only one of these, so
+            // this can't fire today — it's here so that stops being load-bearing.
+            if state.isRecording, mode != .handoff { mode = .agent }
+            return []
+        }
+        if case .handoffModifierEngaged = event {
+            if state.isRecording { mode = .handoff }
             return []
         }
 
@@ -443,6 +472,14 @@ public struct DictationStateMachine: Sendable {
                 hasAnswer = true
                 state = .processing(.answering)
                 return [.runAgent(trimmed)]
+            case .handoff:
+                // Nothing comes back, so this ends like a dictation rather than like a
+                // Talk question: `.inserting` → `.insertFinished` → `.persist`. Any
+                // answer already on screen goes with it — the user just sent their
+                // words somewhere else, and leaving the last one up would suggest it
+                // had something to do with this.
+                state = .processing(.inserting)
+                return [.handOffToClaudeCode(trimmed)] + dismissAnswer() + [.endTalkThread]
             }
 
         case .transcriptFailed where phase == .transcribing:
@@ -471,6 +508,10 @@ public struct DictationStateMachine: Sendable {
 
         case .insertFailed where phase == .inserting:
             state = .notice(.error("Couldn't insert — text copied to clipboard"))
+            return [.rescueToClipboard, .scheduleNoticeDismiss]
+
+        case let .handoffFailed(reason) where phase == .inserting:
+            state = .notice(.error("\(reason) — text copied to clipboard"))
             return [.rescueToClipboard, .scheduleNoticeDismiss]
 
         default:

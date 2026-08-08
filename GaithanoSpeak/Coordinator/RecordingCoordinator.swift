@@ -49,11 +49,8 @@ final class RecordingCoordinator {
     private let hotkeyMonitor: HotkeyMonitor
     private let timings = DictationTimings()
     private let credentials = GoogleCredentials()
-    /// Computed, not stored: `@Observable` rewrites `lazy` into a computed property
-    /// and then rejects it, and a stored initialiser can't reach `credentials`.
-    /// Rebuilding is free — the struct holds one reference and the token cache lives
-    /// in `GoogleCredentials`, not here.
-    private var vertexFormatter: VertexFormatter { VertexFormatter(credentials: credentials) }
+    private let claudeFormatter = ClaudeCLIFormatter()
+    private let handoff = ClaudeCodeHandoff()
     private let localTalk = LocalServerTalkProvider()
 
     var settings: AppSettings
@@ -164,6 +161,12 @@ final class RecordingCoordinator {
         case .escPressed: send(.escPressed)
         case .talkModifierEngaged:
             guard settings.talkEnabled else { return }
+            // Handoff claims the gesture outright: nothing of ours answers, so there's
+            // no context to capture and no panel to fill.
+            if settings.claudeCodeHandoffEnabled {
+                send(.handoffModifierEngaged)
+                return
+            }
             // Capture what the user is looking at NOW, while they're still speaking,
             // so a screenshot + AX read never shows up in answer latency.
             captureTalkContextIfNeeded()
@@ -172,7 +175,9 @@ final class RecordingCoordinator {
             // Requires both consents: Talk off means the gesture never got as far as
             // a model, and agent off means it stays a question rather than an action —
             // which is the only way to reach plain Talk now that ⌃⌥ arms the agent.
-            guard settings.talkEnabled, settings.agentEnabled else { return }
+            // Handoff outranks both; it already claimed this utterance above.
+            guard settings.talkEnabled, settings.agentEnabled,
+                  !settings.claudeCodeHandoffEnabled else { return }
             send(.agentModifierEngaged)
         case .agentConfirm:
             agentRunner?.confirm()
@@ -304,6 +309,12 @@ final class RecordingCoordinator {
             media.resumeIfPaused()
             currentRaw = task
             runAgent(task)
+        case let .handOffToClaudeCode(text):
+            // Nothing of ours is thinking, so give the music back at the same moment
+            // dictation does.
+            media.resumeIfPaused()
+            currentRaw = text
+            handOff(text)
         case .hideAnswerPanel:
             answerTask?.cancel(); answerTask = nil
             // Taking the panel down ends the run: the step list was the only place the
@@ -438,7 +449,7 @@ final class RecordingCoordinator {
         let dictionary = self.dictionary
         let formatter = self.formatter
         let localServer = self.localServer
-        let vertexFormatter = self.vertexFormatter
+        let claudeFormatter = self.claudeFormatter
         let deterministic = self.deterministic
 
         workTask = Task { @MainActor [weak self] in
@@ -447,11 +458,12 @@ final class RecordingCoordinator {
             var text = dictionary.apply(raw)
             var used: FormatterID = .deterministic
 
-            // Both the Apple on-device model and a local OpenAI-compatible server
-            // (LM Studio / Ollama) are "model" formatters that go through the same gate.
+            // The Apple on-device model, a local OpenAI-compatible server (LM Studio /
+            // Ollama), and Haiku via the `claude` CLI are all "model" formatters that
+            // go through the same gate.
             let usesModel = settings.preferredFormatter == .foundationModel
                 || settings.preferredFormatter == .localServer
-                || settings.preferredFormatter == .vertexGemini
+                || settings.preferredFormatter == .claude
 
             if settings.formattingEnabled
                 && usesModel
@@ -463,12 +475,11 @@ final class RecordingCoordinator {
                         let config = LocalServerFormatter.Config(endpoint: settings.localServerURL,
                                                                  model: settings.localServerModel)
                         result = try await localServer.format(text, hints: hints, config: config)
-                    } else if settings.preferredFormatter == .vertexGemini {
-                        let config = VertexFormatter.Config(
-                            model: settings.formatterVertexModel,
-                            projectID: settings.vertexProjectID.isEmpty ? nil : settings.vertexProjectID,
-                            region: settings.vertexRegion)
-                        result = try await vertexFormatter.format(text, hints: hints, config: config)
+                    } else if settings.preferredFormatter == .claude {
+                        let config = ClaudeCLIFormatter.Config(
+                            model: settings.formatterClaudeModel,
+                            executablePath: settings.formatterClaudePath)
+                        result = try await claudeFormatter.format(text, hints: hints, config: config)
                     } else {
                         result = try await formatter.format(text, hints: hints)
                     }
@@ -528,6 +539,46 @@ final class RecordingCoordinator {
             } catch {
                 Log.insert.error("Insert failed: \(error.localizedDescription, privacy: .public)")
                 self.send(.insertFailed)
+            }
+        }
+    }
+
+    // MARK: - Claude Code handoff
+
+    /// Clean the transcript and type it into the Claude Code session.
+    ///
+    /// The model formatter is deliberately skipped. The destination is a coding agent
+    /// that reads intent, not a document that has to read well, and the formatter now
+    /// costs 6–10s (`ClaudeCLIFormatter`) — a wait the user would pay on the way to a
+    /// wait. What does run is the personal dictionary, which is the part that matters
+    /// here: it's what turns "gee are dee bee" into `GRDB` before an agent goes
+    /// looking for the wrong file.
+    ///
+    /// Failure is a notice, never a fallback. Quietly rerouting the utterance to a
+    /// model because no session was found would hand words meant for a terminal to
+    /// something the user didn't pick.
+    private func handOff(_ raw: String) {
+        let text = DeterministicCleanup.clean(dictionary.apply(raw))
+        let submit = settings.claudeCodeSubmitOnPaste
+        let bundleID = settings.claudeCodeAppBundleID
+        let handoff = self.handoff
+
+        workTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.currentFinal = text
+                try await handoff.send(text, submit: submit, bundleID: bundleID)
+                if Task.isCancelled { return }
+                self.currentFormatter = .deterministic
+                self.send(.insertFinished)
+            } catch {
+                if Task.isCancelled { return }
+                let reason = error.localizedDescription
+                Log.insert.error("Claude Code handoff failed: \(reason, privacy: .public)")
+                // The text is rescued to the clipboard either way, which is the right
+                // consolation prize: the words survive and one ⌘V puts them where they
+                // were going.
+                self.send(.handoffFailed(reason))
             }
         }
     }
