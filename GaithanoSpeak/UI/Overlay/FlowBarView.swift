@@ -338,11 +338,21 @@ struct FlowBarView: View {
         }
     }
 
+    /// While the key is down, the label is the only cue to where this utterance is
+    /// going — a handoff types into another app entirely, so say so before it does.
+    private var holdLabel: String {
+        switch mode {
+        case .talk, .agent: return "Asking…"
+        case .handoff: return "To Claude Code…"
+        case .dictate: return "Listening…"
+        }
+    }
+
     private var label: String {
         switch state {
         case .idle: return "Press (⌥) to speak"
         case .blockedSecureInput: return "Secure input active"
-        case .recording(.hold, _): return mode == .talk ? "Asking…" : "Listening…"
+        case .recording(.hold, _): return holdLabel
         case .recording(.locked, _): return "Listening (hands-free)…"
         case .awaitingLockTap: return "Listening…"
         case .processing(.transcribing): return "Transcribing…"

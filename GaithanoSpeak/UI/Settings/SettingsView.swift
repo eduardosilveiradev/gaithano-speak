@@ -41,7 +41,7 @@ struct SettingsView: View {
                 Picker("Formatter", selection: bind(\.preferredFormatter)) {
                     Text(FormatterID.foundationModel.displayName).tag(FormatterID.foundationModel)
                     Text(FormatterID.localServer.displayName).tag(FormatterID.localServer)
-                    Text(FormatterID.vertexGemini.displayName).tag(FormatterID.vertexGemini)
+                    Text(FormatterID.claude.displayName).tag(FormatterID.claude)
                     Text(FormatterID.deterministic.displayName).tag(FormatterID.deterministic)
                 }
                 .disabled(!environment.settings.formattingEnabled)
@@ -52,8 +52,8 @@ struct SettingsView: View {
                 if environment.settings.preferredFormatter == .localServer {
                     localServerFields
                 }
-                if environment.settings.preferredFormatter == .vertexGemini {
-                    vertexFormatterFields
+                if environment.settings.preferredFormatter == .claude {
+                    claudeFormatterFields
                 }
             }
 
@@ -90,6 +90,14 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
 
                 if environment.settings.talkEnabled {
+                    Toggle("Send it to Claude Code instead of answering", isOn: bind(\.claudeCodeHandoffEnabled))
+                    Text("⌃⌥ types what you said straight into the terminal running Claude Code and brings it to the front. Nothing goes to a model of ours, so there's no answer panel — and while this is on, the agent and the provider below are unreachable, which is why they're hidden.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                if environment.settings.talkEnabled && environment.settings.claudeCodeHandoffEnabled {
+                    claudeCodeFields
+                } else if environment.settings.talkEnabled {
                     Picker("Provider", selection: bind(\.talkProvider)) {
                         ForEach(TalkProviderID.allCases, id: \.self) { provider in
                             Text(provider.displayName).tag(provider)
@@ -156,22 +164,50 @@ struct SettingsView: View {
         .frame(width: 460, height: 420)
     }
 
+    /// Handoff settings. The session is found by walking up from a running `claude`
+    /// process, so the normal case needs no configuration — the bundle id is the
+    /// escape hatch for when the wrong session wins.
+    @ViewBuilder private var claudeCodeFields: some View {
+        Toggle("Press Return to send it", isOn: bind(\.claudeCodeSubmitOnPaste))
+        Text(environment.settings.claudeCodeSubmitOnPaste
+             ? "Your words are submitted as soon as they land, so Claude Code starts working without you touching the keyboard. Turn this off to leave them in the composer to read first."
+             : "Your words are typed in and left there — you press Return yourself.")
+            .font(.caption).foregroundStyle(.secondary)
+
+        if let app = ClaudeCodeHandoff.hostApplication(preferredBundleID: environment.settings.claudeCodeAppBundleID) {
+            Label("Found a session in \(app.localizedName ?? app.bundleIdentifier ?? "an app").",
+                  systemImage: "checkmark.seal")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Label("No running Claude Code session found. Start one, or name the app below. Until then ⌃⌥ leaves your words on the clipboard and says so.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.orange)
+        }
+        TextField("App bundle id (blank = find it automatically)", text: bind(\.claudeCodeAppBundleID))
+            .textFieldStyle(.roundedBorder)
+    }
+
     /// The one formatter that uploads dictation. The warning is deliberately blunt
     /// and deliberately not collapsible — a user picking this from a dropdown has no
     /// other cue that the app just stopped being local-first.
-    @ViewBuilder private var vertexFormatterFields: some View {
-        TextField("Model", text: bind(\.formatterVertexModel))
+    @ViewBuilder private var claudeFormatterFields: some View {
+        TextField("Model", text: bind(\.formatterClaudeModel))
             .textFieldStyle(.roundedBorder)
-        Label("Everything you dictate — in every app, not just this one — is uploaded to Google to be punctuated. That includes anything you'd never paste into a chatbot. The other formatters never leave your Mac.",
+        Label("Everything you dictate — in every app, not just this one — is sent to Anthropic to be punctuated. That includes anything you'd never paste into a chatbot, and the CLI keeps a copy of each one on disk under ~/.claude. The other formatters never leave your Mac.",
               systemImage: "exclamationmark.triangle")
             .font(.caption).foregroundStyle(.orange)
-        if !GoogleCredentials.isConfigured {
-            Text("No gcloud credentials found — run `gcloud auth application-default login`. Until then this falls back to basic cleanup on every utterance.")
+        Label("Expect two to five seconds before your text appears, and every dictation counts against your Claude plan's usage. Set the model to “haiku” to roughly halve the wait, at the price of occasionally mangling long dictations that continue existing text.",
+              systemImage: "clock")
+            .font(.caption).foregroundStyle(.orange)
+        if let path = ClaudeCLIFormatter.discoveredPath, environment.settings.formatterClaudePath.isEmpty {
+            Text("Using \(path).")
                 .font(.caption).foregroundStyle(.secondary)
-        } else if environment.settings.vertexProjectID.isEmpty && GoogleCredentials.defaultProjectID == nil {
-            Text("No GCP project — set one under Talk, or run `gcloud config set project`.")
+        } else if environment.settings.formatterClaudePath.isEmpty {
+            Text("Can't find the `claude` command — install it, or type its full path below (`which claude` in Terminal). Until then this falls back to basic cleanup on every utterance.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        TextField("CLI path (blank = find it automatically)", text: bind(\.formatterClaudePath))
+            .textFieldStyle(.roundedBorder)
     }
 
     @ViewBuilder private var vertexFields: some View {

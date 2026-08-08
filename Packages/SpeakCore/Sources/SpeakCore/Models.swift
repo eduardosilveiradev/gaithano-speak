@@ -17,19 +17,23 @@ public enum EngineID: String, Codable, Sendable, CaseIterable {
 public enum FormatterID: String, Codable, Sendable, CaseIterable {
     case foundationModel
     case deterministic
+    /// Haiku via the `claude` CLI in print mode. The only formatter that leaves the
+    /// machine — see `ClaudeCLIFormatter` for what it costs and why it's offered.
     case claude
     case localServer
-    /// Gemini on Vertex. The only formatter that leaves the machine — see
-    /// `VertexFormatter` for why it's offered and why it isn't the default.
+    /// Gone: the Vertex formatter was replaced by `.claude`. The case survives only
+    /// so saved settings still decode and `SettingsStore.load()` can migrate them —
+    /// removing it would make the decode fail and silently reset the user's choice
+    /// to the default. Nothing selects it, and nothing formats with it.
     case vertexGemini
 
     public var displayName: String {
         switch self {
         case .foundationModel: return "On-device (Apple Intelligence)"
         case .deterministic: return "Basic cleanup"
-        case .claude: return "Claude (cloud)"
+        case .claude: return "Claude CLI (cloud)"
         case .localServer: return "Local LLM (LM Studio / Ollama)"
-        case .vertexGemini: return "Gemini on Vertex (cloud)"
+        case .vertexGemini: return "Gemini on Vertex (removed)"
         }
     }
 }

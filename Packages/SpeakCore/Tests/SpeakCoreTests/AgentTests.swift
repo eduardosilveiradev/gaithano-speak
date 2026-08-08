@@ -344,3 +344,93 @@ struct AgentModeTests {
         #expect(effects.contains(.hideAnswerPanel))
     }
 }
+
+// MARK: - Claude Code handoff
+
+@Suite("Claude Code handoff mode")
+struct ClaudeCodeHandoffModeTests {
+
+    @Test("The handoff modifier claims the utterance")
+    func upgradesToHandoff() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown)
+        let effects = m.handle(.handoffModifierEngaged)
+        #expect(m.mode == .handoff)
+        #expect(effects.isEmpty)
+    }
+
+    /// The coordinator emits only one of the three events, but that's a refactor away
+    /// from being wrong. The reducer refuses the demotion itself, so a handoff can
+    /// never become an agent run that acts on the user's screen.
+    @Test("Neither Talk nor the agent can demote a handoff")
+    func noDemotion() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown)
+        m.handle(.handoffModifierEngaged)
+        m.handle(.agentModifierEngaged)
+        #expect(m.mode == .handoff)
+        m.handle(.talkModifierEngaged)
+        #expect(m.mode == .handoff)
+    }
+
+    @Test("A handoff transcript is delivered, not answered")
+    func handoffPathDelivers() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown); m.handle(.minHoldElapsed)
+        m.handle(.handoffModifierEngaged)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+
+        let effects = m.handle(.transcriptReady("run the tests"))
+        #expect(effects.contains(.handOffToClaudeCode("run the tests")))
+        #expect(m.state == .processing(.inserting))
+        // Nothing of ours is thinking, so no panel goes up.
+        #expect(!m.hasAnswer)
+    }
+
+    /// It ends like a dictation — the utterance is worth keeping in history.
+    @Test("A delivered handoff persists")
+    func handoffPersists() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown); m.handle(.minHoldElapsed)
+        m.handle(.handoffModifierEngaged)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+        m.handle(.transcriptReady("run the tests"))
+
+        let effects = m.handle(.insertFinished)
+        #expect(effects == [.persist])
+        #expect(m.state == .idle)
+    }
+
+    /// The reason has to reach the user: "no session found" is something they can fix,
+    /// and it arrives by the same door as an insertion that simply failed.
+    @Test("A failed handoff says why and rescues the text")
+    func handoffFailureSurfaces() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown); m.handle(.minHoldElapsed)
+        m.handle(.handoffModifierEngaged)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+        m.handle(.transcriptReady("run the tests"))
+
+        let effects = m.handle(.handoffFailed("No Claude Code session found"))
+        #expect(effects.contains(.rescueToClipboard))
+        #expect(m.state == .notice(.error("No Claude Code session found — text copied to clipboard")))
+    }
+
+    /// The silence gate covers every mode that hands words to a model with tools, and
+    /// a handoff hands them to the most capable one on the machine.
+    @Test("Silence artifacts never reach Claude Code")
+    func silenceIsGated() {
+        var m = DictationStateMachine()
+        m.handle(.optionDown); m.handle(.minHoldElapsed)
+        m.handle(.handoffModifierEngaged)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+
+        let effects = m.handle(.transcriptReady("Thank you."))
+        #expect(!effects.contains(.handOffToClaudeCode("Thank you.")))
+        #expect(m.state == .notice(.noSpeech))
+    }
+}
