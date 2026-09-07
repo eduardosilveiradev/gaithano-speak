@@ -33,12 +33,63 @@ public enum TalkPromptBuilder {
         turns out to be unrelated to the image, ignore the image entirely.
         """
 
+    /// Extra guidance for providers that can't be handed an image inline and have to
+    /// open it themselves — the `claude` CLI, which takes one text prompt and a Read
+    /// tool. The instruction to read it *first* matters: without it the model answers
+    /// from the question alone and only then looks, which costs a round trip and
+    /// produces an answer that ignores the screen.
+    static let fileVisionNote = """
+        A screenshot of the user's screen has been saved to the file named at the top \
+        of their message. Read that file before answering — the question is almost \
+        certainly about something visible in it. If it turns out to be unrelated, \
+        answer without reading the file. Never mention the file, the path, or the act \
+        of reading it.
+        """
+
     /// The full system prompt, including any context-dependent notes.
     public static func systemPrompt(for context: TalkContext) -> String {
         var parts = [instructions]
         if context.hasVision {
             parts.append(visionNote)
         }
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// System prompt for a provider that reads the screenshot off disk rather than
+    /// receiving it inline. `path` is nil whenever there is no screenshot, which is
+    /// also the case when vision is off — the note is what buys the Read tool its
+    /// place in the request, so it must not appear without one.
+    public static func systemPrompt(forScreenshotAt path: String?) -> String {
+        var parts = [instructions]
+        if let path, !path.isEmpty {
+            parts.append(fileVisionNote)
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// Flatten a thread into the single prompt string a one-shot CLI call takes.
+    ///
+    /// Talk threads are short-lived — they live only as long as the answer panel — so
+    /// replaying the whole thing per call is cheap, and it keeps every call a fresh
+    /// session. That's the same reason `FoundationModelFormatter` builds a new session
+    /// each time: a resumed session would carry the previous question into the next
+    /// one whether the user wanted it or not.
+    public static func flattenedPrompt(thread: [TalkTurn], screenshotPath: String? = nil) -> String {
+        var parts: [String] = []
+
+        let prior = thread.dropLast()
+        if !prior.isEmpty {
+            let transcript = prior.map { turn in
+                (turn.role == .user ? "User: " : "You: ") + turn.text
+            }.joined(separator: "\n\n")
+            parts.append("Earlier in this conversation:\n\n\(transcript)\n\n---")
+        }
+
+        if let screenshotPath, !screenshotPath.isEmpty {
+            parts.append("Screenshot of the user's screen: \(screenshotPath)")
+        }
+
+        parts.append(thread.last?.text ?? "")
         return parts.joined(separator: "\n\n")
     }
 
