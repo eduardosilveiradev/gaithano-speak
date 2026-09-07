@@ -56,7 +56,18 @@ public enum AgentToolAllowlist {
 
     // MARK: - The list
 
-    /// macOS desktop control, via `mcp-macos-cua`.
+    /// macOS desktop control, via the app's own server (`Resources/MCPServers/macos.js`).
+    ///
+    /// Written rather than taken off the shelf. `mcp-macos-cua`, which this list was
+    /// first drafted against, names almost none of these tools — of the sixteen
+    /// originally here, two existed — so the gate would have filtered it to nothing,
+    /// and its `type_text` reached a shell through unescaped quotes. The list and the
+    /// server now describe each other exactly, which is the only arrangement where
+    /// reading this file tells you what Agent Mode can do.
+    ///
+    /// `set_brightness` and `media_control` used to be here and are gone: neither is
+    /// reachable from a subprocess without private frameworks, so listing them meant
+    /// promising a capability whose only possible outcome was a failed tool call.
     ///
     /// Bounded verbs only. There is no "run AppleScript", no "run this command", and no
     /// tool that takes a script of any kind — the spec rules those out, and a proxy that
@@ -76,8 +87,6 @@ public enum AgentToolAllowlist {
         "close_window",
         "quit_application",
         "set_volume",
-        "set_brightness",
-        "media_control",
     ]
 
     /// Chrome, via Microsoft's `playwright-mcp` in extension mode.
@@ -98,7 +107,7 @@ public enum AgentToolAllowlist {
         "browser_type",
         "browser_fill_form",
         "browser_press_key",
-        "browser_scroll",
+        "browser_mouse_wheel",
         "browser_wait_for",
         "browser_tabs",
         "browser_resize",

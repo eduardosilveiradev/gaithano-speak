@@ -42,6 +42,13 @@ fi
 if [ -d "$ROOT/GaithanoSpeak/Resources" ]; then
   cp "$ROOT/GaithanoSpeak/Resources/"*.png "$APP/Contents/Resources/" 2>/dev/null || true
   cp "$ROOT/GaithanoSpeak/Resources/"*.py "$APP/Contents/Resources/" 2>/dev/null || true
+  # Agent Mode's own MCP servers. Bundled rather than installed so they can never be
+  # a version out of step with the allowlist they satisfy — a mismatch there presents
+  # as tools silently missing, because the proxy filters what it doesn't recognise.
+  if [ -d "$ROOT/GaithanoSpeak/Resources/MCPServers" ]; then
+    rm -rf "$APP/Contents/Resources/MCPServers"
+    cp -R "$ROOT/GaithanoSpeak/Resources/MCPServers" "$APP/Contents/Resources/MCPServers"
+  fi
 fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable GaithanoSpeak" "$APP/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP/Contents/Info.plist" 2>/dev/null || true

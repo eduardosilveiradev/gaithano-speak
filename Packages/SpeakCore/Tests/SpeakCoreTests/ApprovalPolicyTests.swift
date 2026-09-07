@@ -169,7 +169,7 @@ struct ActionRiskPolicyTests {
     }
 
     @Test("Ordinary reversible device controls run without asking", arguments: [
-        "set_volume", "set_brightness", "media_control",
+        "set_volume",
     ])
     func mediaControlsAreAutomatic(tool: String) {
         #expect(ActionRiskPolicy.classify(call(.macos, tool)) == nil)
@@ -177,7 +177,7 @@ struct ActionRiskPolicyTests {
 
     @Test("Reading and navigating the web runs without asking", arguments: [
         "browser_navigate", "browser_navigate_back", "browser_snapshot",
-        "browser_take_screenshot", "browser_hover", "browser_scroll",
+        "browser_take_screenshot", "browser_hover", "browser_mouse_wheel",
         "browser_wait_for", "browser_console_messages", "browser_network_requests",
     ])
     func chromeReadsAreAutomatic(tool: String) {

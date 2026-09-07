@@ -72,7 +72,7 @@ public enum ActionRiskPolicy {
     static let macosAutomaticTools: Set<String> = [
         "capture_screen", "list_applications", "list_windows",
         "open_application", "activate_application", "accessibility_tree",
-        "scroll", "set_volume", "set_brightness", "media_control",
+        "scroll", "set_volume",
     ]
 
     private static func classifyMacOS(_ call: AgentToolCall) -> ApprovalCategory? {
@@ -113,7 +113,7 @@ public enum ActionRiskPolicy {
     static let chromeAutomaticTools: Set<String> = [
         "browser_navigate", "browser_navigate_back", "browser_snapshot",
         "browser_take_screenshot", "browser_hover", "browser_select_option",
-        "browser_scroll", "browser_wait_for", "browser_resize",
+        "browser_mouse_wheel", "browser_wait_for", "browser_resize",
         "browser_console_messages", "browser_network_requests",
     ]
 

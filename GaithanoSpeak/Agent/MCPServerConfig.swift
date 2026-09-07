@@ -116,13 +116,13 @@ enum MCPServerConfig {
         [
             .macos: macOSLaunch(paths) != nil
                 ? .available
-                : .unavailable("macOS control needs `mcp-macos-cua`. Install it, or set its path in Settings."),
+                : .unavailable("macOS control needs Node. Install Node 18 or later, then restart Gaithano Speak."),
             .chrome: chromeLaunch(paths) != nil
                 ? .available
                 : .unavailable("Chrome control needs Node. Install Node, then add the Playwright MCP extension to Chrome."),
             .smartthings: smartThingsLaunch(paths) != nil
                 ? .available
-                : .unavailable("SmartThings needs `smartthings-cli` and the adapter. Set the adapter path in Settings."),
+                : .unavailable("SmartThings needs Node and the SmartThings CLI. Install it with `npm install -g @smartthings/cli`, then sign in with `smartthings login`."),
             .control: .available,
         ]
     }
@@ -130,10 +130,40 @@ enum MCPServerConfig {
     // MARK: macOS
 
     private static func macOSLaunch(_ paths: Paths) -> MCPServerLaunch? {
-        guard let executable = resolve(explicit: paths.macosServer, names: ["mcp-macos-cua"]) else {
-            return nil
+        guard let node = nodeExecutable(),
+              let script = serverScript("macos.js", override: paths.macosServer) else { return nil }
+        return MCPServerLaunch(id: .macos, executable: node, arguments: [script.path])
+    }
+
+    // MARK: The app's own servers
+
+    /// The bundled MCP servers, which ship with the app rather than being installed.
+    ///
+    /// Bundled for the reason `qwen_tts_server.py` is: these are versioned with the
+    /// allowlist they satisfy, and an installed copy could drift out of step with it
+    /// — a server one release behind presents as tools silently missing, because the
+    /// proxy filters what it doesn't recognise and says nothing. There is deliberately
+    /// no fallback to a path inside the source tree: that works on one machine and
+    /// hides a broken build everywhere else.
+    private static func serverScript(_ name: String, override: String) -> URL? {
+        let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            // An explicit path that isn't there is an error the user can fix, not a
+            // reason to quietly run the bundled one they were trying to replace.
+            return FileManager.default.fileExists(atPath: trimmed)
+                ? URL(fileURLWithPath: trimmed)
+                : nil
         }
-        return MCPServerLaunch(id: .macos, executable: executable, arguments: [])
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let url = resources.appendingPathComponent("MCPServers/\(name)")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Node, for the two servers written here. Kept separate from `Paths.nodeRunner`,
+    /// which names `npx` for Playwright — the two are different binaries and pointing
+    /// one setting at both would break whichever the user didn't have in mind.
+    private static func nodeExecutable() -> URL? {
+        resolve(explicit: "", names: ["node"])
     }
 
     // MARK: Chrome
@@ -164,9 +194,18 @@ enum MCPServerConfig {
     /// arguments into a process invocation. That separation is the reason SmartThings
     /// can expose "every device command the account has" without exposing a shell.
     private static func smartThingsLaunch(_ paths: Paths) -> MCPServerLaunch? {
-        guard let executable = resolve(explicit: paths.smartThingsAdapter,
-                                       names: ["smartthings-mcp"]) else { return nil }
-        return MCPServerLaunch(id: .smartthings, executable: executable, arguments: [])
+        guard let node = nodeExecutable(),
+              let script = serverScript("smartthings.js", override: paths.smartThingsAdapter),
+              let cli = resolve(explicit: "", names: ["smartthings"]) else { return nil }
+        // The adapter finds the CLI itself if this is missing, but a GUI app's PATH
+        // makes that search the unreliable half — passing the resolved path means the
+        // app and the adapter can never disagree about which CLI is being driven.
+        var environment = ClaudeCLIFormatter.childEnvironment()
+        environment["GAITHANO_SMARTTHINGS_CLI"] = cli.path
+        return MCPServerLaunch(id: .smartthings,
+                               executable: node,
+                               arguments: [script.path],
+                               environment: environment)
     }
 
     // MARK: Finding binaries
