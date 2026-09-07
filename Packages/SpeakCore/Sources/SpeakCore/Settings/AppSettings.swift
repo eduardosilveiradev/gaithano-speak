@@ -66,6 +66,28 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// bare PATH, so `claude` is never simply "on the path" the way it is in a shell.
     public var formatterClaudePath: String
 
+    // MARK: Agent Mode
+
+    /// Executable for the bounded macOS control MCP server (`mcp-macos-cua`).
+    ///
+    /// These three are paths and not toggles for the same reason
+    /// `formatterClaudePath` is: a launchd-started GUI app has a bare PATH, so none of
+    /// these is ever simply "on the path" the way it is in a shell. Blank means the
+    /// usual install locations are searched, and a server that still can't be found is
+    /// reported as one unavailable capability rather than taking Agent Mode down.
+    public var agentMacOSMCPPath: String
+    /// Executable for the `smartthings-cli` MCP adapter.
+    public var agentSmartThingsMCPPath: String
+    /// Path to `npx`, which runs `@playwright/mcp` for Chrome control.
+    public var agentNodeRunnerPath: String
+    /// How long the Claude Code session may emit *nothing* before the turn is declared
+    /// dead.
+    ///
+    /// Not a run timeout. An agent run legitimately takes minutes — it is waiting on a
+    /// page, on a device, or on the user at an approval prompt — so elapsed time says
+    /// nothing about whether it is stuck. Silence does.
+    public var agentStallTimeoutSeconds: Double
+
     // MARK: Dictionary learning
 
     /// Watch what the formatter corrects and build dictionary entries from it.
@@ -170,6 +192,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 localServerModel: String = "gemma-4-e2b-it-mlx",
                 formatterClaudeModel: String = "sonnet",
                 formatterClaudePath: String = "",
+                agentMacOSMCPPath: String = "",
+                agentSmartThingsMCPPath: String = "",
+                agentNodeRunnerPath: String = "",
+                agentStallTimeoutSeconds: Double = 120,
                 dictionaryLearningEnabled: Bool = true,
                 dictionaryLearningAutoAccept: Bool = false,
                 talkEnabled: Bool = true,
@@ -202,6 +228,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.localServerModel = localServerModel
         self.formatterClaudeModel = formatterClaudeModel
         self.formatterClaudePath = formatterClaudePath
+        self.agentMacOSMCPPath = agentMacOSMCPPath
+        self.agentSmartThingsMCPPath = agentSmartThingsMCPPath
+        self.agentNodeRunnerPath = agentNodeRunnerPath
+        self.agentStallTimeoutSeconds = agentStallTimeoutSeconds
         self.dictionaryLearningEnabled = dictionaryLearningEnabled
         self.dictionaryLearningAutoAccept = dictionaryLearningAutoAccept
         self.talkEnabled = talkEnabled
@@ -247,6 +277,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         localServerModel = try c.decodeIfPresent(String.self, forKey: .localServerModel) ?? d.localServerModel
         formatterClaudeModel = try c.decodeIfPresent(String.self, forKey: .formatterClaudeModel) ?? d.formatterClaudeModel
         formatterClaudePath = try c.decodeIfPresent(String.self, forKey: .formatterClaudePath) ?? d.formatterClaudePath
+        agentMacOSMCPPath = try c.decodeIfPresent(String.self, forKey: .agentMacOSMCPPath) ?? d.agentMacOSMCPPath
+        agentSmartThingsMCPPath = try c.decodeIfPresent(String.self, forKey: .agentSmartThingsMCPPath) ?? d.agentSmartThingsMCPPath
+        agentNodeRunnerPath = try c.decodeIfPresent(String.self, forKey: .agentNodeRunnerPath) ?? d.agentNodeRunnerPath
+        agentStallTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .agentStallTimeoutSeconds) ?? d.agentStallTimeoutSeconds
         dictionaryLearningEnabled = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningEnabled) ?? d.dictionaryLearningEnabled
         dictionaryLearningAutoAccept = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningAutoAccept) ?? d.dictionaryLearningAutoAccept
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled

@@ -2,7 +2,6 @@ import Foundation
 import os
 import SpeakCore
 
-private let agentLog = Logger(subsystem: Log.subsystem, category: "agent")
 
 /// The app-private temporary storage one Agent Mode conversation lives in: the empty
 /// working directory the Claude Code session runs from, the screenshots retained for
@@ -108,7 +107,7 @@ actor AgentScratchStore {
     /// site wants the file, it goes through here and the name makes the missing user
     /// gesture obvious at review.
     func userRequestedCopy(of screenshot: AgentScreenshot) throws -> Data {
-        agentLog.info("Exporting an agent screenshot at the user's request")
+        Log.agent.info("Exporting an agent screenshot at the user's request")
         return try Data(contentsOf: screenshot.url)
     }
 
@@ -137,7 +136,7 @@ actor AgentScratchStore {
             }
         } catch {
             // A tool log that can't be written must not take a run down with it.
-            agentLog.error("Tool log write failed: \(error.localizedDescription, privacy: .public)")
+            Log.agent.error("Tool log write failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -157,7 +156,7 @@ actor AgentScratchStore {
     /// Returns whether it did, so the coordinator can tear the session down to match.
     func expireIfIdle(_ conversation: AgentConversation, now: Date = Date()) -> Bool {
         guard conversation.isExpired(at: now) else { return false }
-        agentLog.info("Agent conversation idle past its window; deleting its scratch data")
+        Log.agent.info("Agent conversation idle past its window; deleting its scratch data")
         reset()
         return true
     }
@@ -185,7 +184,7 @@ actor AgentScratchStore {
             removed += 1
         }
         if removed > 0 {
-            agentLog.info("Removed \(removed, privacy: .public) abandoned agent scratch directories")
+            Log.agent.info("Removed \(removed, privacy: .public) abandoned agent scratch directories")
         }
     }
 
@@ -195,7 +194,7 @@ actor AgentScratchStore {
         } catch CocoaError.fileNoSuchFile {
             // Already gone — reboot, or a second purge. Not worth a log line.
         } catch {
-            agentLog.error("Could not delete \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            Log.agent.error("Could not delete \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 }

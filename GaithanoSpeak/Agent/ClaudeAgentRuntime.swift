@@ -290,7 +290,7 @@ final class ClaudeAgentRuntime {
             // No `result` line at all: the CLI died before finishing its turn. It exits
             // 0 on a *failed* turn, so the status is only informative when it isn't.
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            Self.log.error("agent turn exit \(status, privacy: .public): \(detail, privacy: .public)")
+            Log.agent.error("agent turn exit \(status, privacy: .public): \(detail, privacy: .public)")
             emit(.failed(detail.isEmpty
                          ? "Claude Code ended the turn without answering."
                          : String(detail.prefix(200))))
@@ -330,7 +330,7 @@ final class ClaudeAgentRuntime {
     /// opened, or a long task would lose its own context mid-run.
     func expireIfNeeded(now: Date = Date()) {
         guard !isRunning, conversation.sessionID != nil, conversation.isExpired(at: now) else { return }
-        Self.log.info("agent conversation expired after 15 minutes idle — session ended, scratch deleted")
+        Log.agent.info("agent conversation expired after 15 minutes idle — session ended, scratch deleted")
         endSession()
     }
 
@@ -477,7 +477,6 @@ final class ClaudeAgentRuntime {
         for url in contents { try? fm.removeItem(at: url) }
     }
 
-    static let log = Logger(subsystem: Log.subsystem, category: "agent")
 }
 
 // MARK: - One `claude` invocation

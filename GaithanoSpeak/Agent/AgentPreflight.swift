@@ -3,7 +3,6 @@ import AppKit
 import os
 import SpeakCore
 
-private let agentLog = Logger(subsystem: Log.subsystem, category: "agent")
 
 /// Runs the seven availability checks and reports what Agent Mode can and can't do.
 ///
@@ -60,7 +59,7 @@ struct AgentPreflight: Sendable {
             PreflightCheckResult(.models, models(claudeVersion: version)),
         ]
         let status = PreflightStatus(results: results)
-        agentLog.info("Agent preflight: \(status.headline, privacy: .public)")
+        Log.agent.info("Agent preflight: \(status.headline, privacy: .public)")
         return status
     }
 
@@ -250,7 +249,7 @@ struct AgentPreflight: Sendable {
             do {
                 try process.run()
             } catch {
-                agentLog.error("Preflight probe failed to launch: \(error.localizedDescription, privacy: .public)")
+                Log.agent.error("Preflight probe failed to launch: \(error.localizedDescription, privacy: .public)")
                 return nil
             }
             let killer = DispatchWorkItem { [self] in

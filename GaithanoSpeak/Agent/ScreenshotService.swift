@@ -3,7 +3,6 @@ import CoreGraphics
 import os
 import SpeakCore
 
-private let agentLog = Logger(subsystem: Log.subsystem, category: "agent")
 
 /// One capture, in the two forms it is used in.
 ///
@@ -111,7 +110,7 @@ struct ScreenshotService: Sendable {
         // `CGRequestScreenCaptureAccess()` would put a dialog in front of a user who
         // is mid-sentence.
         guard CGPreflightScreenCaptureAccess() else {
-            agentLog.error("Agent capture blocked: Screen Recording not granted")
+            Log.agent.error("Agent capture blocked: Screen Recording not granted")
             throw ScreenshotFailure.screenRecordingDenied
         }
 
@@ -123,7 +122,7 @@ struct ScreenshotService: Sendable {
         defer { signpost.endInterval("agentScreenshot", state) }
 
         guard let shot = await ScreenCapture.capture() else {
-            agentLog.error("Agent capture failed after the permission check passed")
+            Log.agent.error("Agent capture failed after the permission check passed")
             throw ScreenshotFailure.captureFailed
         }
 

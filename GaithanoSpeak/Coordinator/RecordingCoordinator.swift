@@ -21,6 +21,14 @@ final class RecordingCoordinator {
     private(set) var answerText: String = ""
     /// Which mode the current (or just-finished) utterance is in, for the overlay.
     private(set) var mode: UtteranceMode = .dictate
+    /// Everything the Agent Mode panel draws. Nil when no run has happened yet, which
+    /// is also what takes the panel off screen — see `AgentPanelController`.
+    ///
+    /// Folded from `AgentEvent`s and never mutated field-by-field: `AgentTranscript.apply`
+    /// is where the invariants live (escalation only climbs, allow-all dies with the
+    /// run, an interrupted step stays interrupted), and reaching around it is how those
+    /// stop being true.
+    private(set) var agentTranscript: AgentTranscript?
     /// Whether the overlay should draw the answer panel. Mirrors the reducer's
     /// `hasAnswer` rather than `state.showsAnswerPanel`, because during a follow-up
     /// the state is `.recording` while the panel must stay on screen.
@@ -52,6 +60,20 @@ final class RecordingCoordinator {
     private let claudeFormatter = ClaudeCLIFormatter()
     private let handoff = ClaudeCodeHandoff()
     private let localTalk = LocalServerTalkProvider()
+    private let agentRuntime = ClaudeAgentRuntime()
+    let agentScratch = AgentScratchStore()
+    private let agentScreenshots: ScreenshotService
+    /// Built lazily on the first agent run: it launches three MCP subprocesses, and the
+    /// overwhelming majority of this app's use never asks for an agent.
+    private var agentProxy: MCPApprovalProxy?
+    private var agentEventTask: Task<Void, Never>?
+    /// The continuation the MCP proxy is suspended on while an approval is on screen.
+    /// Exactly one can exist — the proxy holds the tool call until it resumes, so a
+    /// second prompt cannot appear behind the first.
+    private var pendingApproval: CheckedContinuation<ApprovalDecision, Never>?
+    /// Identifies the current agent request to the proxy, which keys the "allow all"
+    /// grant by it. A grant whose id doesn't match the active run is not in force.
+    private var agentRunID: String?
 
     var settings: AppSettings
     private var dictionary = PersonalDictionary()
@@ -143,6 +165,7 @@ final class RecordingCoordinator {
         self.database = database
         self.hotkeyMonitor = hotkeyMonitor
         self.settings = settings
+        self.agentScreenshots = ScreenshotService(scratch: agentScratch)
         recorder.prewarm()
     }
 
@@ -156,7 +179,21 @@ final class RecordingCoordinator {
         // releasing it always means "I'm done speaking".
         case .chordUp: send(.optionUp)
         case .otherKeyWhileOptionHeld: send(.otherKeyWhileOptionHeld)
-        case .escPressed: send(.escPressed)
+        case .escPressed:
+            // Escape belongs to the agent run while its panel is up. The run may be
+            // parked at an approval with the mic long since closed — a state the
+            // dictation reducer knows nothing about. First press stops the run, second
+            // takes the panel down.
+            if let transcript = agentTranscript {
+                if transcript.phase.isActive {
+                    cancelAgentRun()
+                } else {
+                    endAgentConversation()
+                    send(.escPressed)
+                }
+                return
+            }
+            send(.escPressed)
         case .copyAnswer:
             SmartInserter.copyToClipboard(answerText)
         case .insertAnswer:
@@ -187,7 +224,10 @@ final class RecordingCoordinator {
     private func send(_ event: DictationEvent) {
         let effects = machine.handle(event)
         mode = machine.mode
-        showsAnswerPanel = machine.hasAnswer
+        // The reducer's `hasAnswer` is what keeps ⌘C / ⌘⏎ / Esc pointed at the answer
+        // rather than at the app underneath, and an agent run needs all of that. What it
+        // must not do is raise the *Talk* panel on top of the agent's own.
+        showsAnswerPanel = machine.hasAnswer && machine.mode != .agent
         let newState = machine.state
         if newState != state {
             let wasCommitted = state.isCommitted
@@ -644,10 +684,181 @@ final class RecordingCoordinator {
     /// quietly falling back to dictation would type a task meant for the agent into
     /// whatever document the user happened to be looking at.
     private func runAgent(_ task: String) {
-        Log.app.notice("Agent task received but Agent Mode is not implemented yet")
-        answerText = ""
-        streamStarted = false
-        send(.answerFailed("Agent Mode isn't available yet"))
+        // The panel is the whole of the agent's UI, so it goes up before anything can
+        // fail — a run that dies during setup has to be visible dying, not silent.
+        var transcript = agentTranscript ?? AgentTranscript()
+        transcript.apply(.requestStarted(task))
+        agentTranscript = transcript
+        hotkeyMonitor.setApprovalPending(false)
+
+        let runID = UUID().uuidString
+        agentRunID = runID
+
+        Task { @MainActor in
+            guard let proxy = await self.preparedProxy() else {
+                self.applyAgentEvent(.failed("Agent Mode has no tools: its MCP servers "
+                                             + "couldn't start. Check Settings."))
+                return
+            }
+            await proxy.beginRun(id: runID)
+            self.agentRuntime.configuration = .init(
+                executablePath: self.settings.formatterClaudePath,
+                mcpConfigPath: MCPServerConfig.writeProxyConfig(),
+                allowedTools: [MCPServerConfig.allowedToolsArgument],
+                stallTimeout: self.settings.agentStallTimeoutSeconds)
+            self.agentRuntime.start(request: task)
+        }
+    }
+
+    /// Build the proxy on first use and connect whatever downstream servers exist.
+    ///
+    /// `connect` never throws: a server that won't start is one unavailable capability,
+    /// not a dead session, which is the spec's rule and the reason a machine without
+    /// SmartThings still gets desktop control.
+    private func preparedProxy() async -> MCPApprovalProxy? {
+        if let agentProxy { return agentProxy }
+        let proxy = MCPApprovalProxy(
+            gate: self,
+            observer: self,
+            controlHandler: { [weak self] tool, arguments in
+                guard let self, tool == AgentModelRouter.escalateTool else {
+                    return "Escalation unavailable — continue the request yourself."
+                }
+                let reason: String
+                if case let .string(text)? = arguments["reason"] { reason = text } else { reason = "" }
+                return await MainActor.run {
+                    self.agentRuntime.escalationAcknowledgement(callID: tool, reason: reason)
+                }
+            })
+        let paths = MCPServerConfig.Paths(macosServer: settings.agentMacOSMCPPath,
+                                          smartThingsAdapter: settings.agentSmartThingsMCPPath,
+                                          nodeRunner: settings.agentNodeRunnerPath)
+        await proxy.connect(MCPServerConfig.launches(paths: paths))
+        Task { await proxy.listen(atPath: MCPServerConfig.socketPath) }
+        agentProxy = proxy
+        startAgentEventPump()
+        return proxy
+    }
+
+    /// One consumer for the life of the app. The runtime's stream never finishes, so
+    /// this task is started once and deliberately never awaited.
+    private func startAgentEventPump() {
+        guard agentEventTask == nil else { return }
+        let events = agentRuntime.events
+        agentEventTask = Task { @MainActor [weak self] in
+            for await event in events { self?.applyAgentEvent(event) }
+        }
+    }
+
+    /// The single door into the transcript. Everything that has to happen *alongside* a
+    /// fold — the hotkey's licence to eat Y/N/A, ending the proxy's run, speaking the
+    /// answer — hangs off here so it cannot be forgotten at one of the call sites.
+    private func applyAgentEvent(_ event: AgentEvent) {
+        var transcript = agentTranscript ?? AgentTranscript()
+        transcript.apply(event)
+        agentTranscript = transcript
+
+        // The entire licence to consume three bare letters system-wide. Left true after
+        // a run dies under a pending prompt, the user loses Y, N and A in every text
+        // field on the machine — so it is derived from the transcript rather than set
+        // by whoever happened to raise the prompt.
+        hotkeyMonitor.setApprovalPending(transcript.pendingApproval != nil)
+        // Escape has to reach a run that is parked at an approval with the mic long
+        // since closed, so "active" spans the whole run and not just the recording.
+        hotkeyMonitor.setActive(state.isRecording || state.isProcessing || transcript.phase.isActive)
+
+        // The reducer parked in `.processing(.answering)` when `.runAgent` was emitted
+        // and has no other way out. Miss this and the dictation hotkey stays dead for
+        // the rest of the session — the single most expensive bug this wiring can have.
+        switch event {
+        case let .responseFinished(text):
+            endAgentRun()
+            // So ⌘C and ⌘⏎ act on the agent's answer, the same as a Talk one.
+            answerText = text
+            send(.answerReady)
+            // Speech happens here and not on `.responseDelta`: the deltas include the
+            // model narrating intermediate turns ("Opening Safari…"), and the spec
+            // allows only the user-facing answer to be read aloud.
+            speakAnswer(text)
+        case let .failed(reason):
+            endAgentRun()
+            send(.answerFailed(reason))
+        case .cancelled:
+            endAgentRun()
+            if state.isProcessing { send(.escPressed) }
+        default:
+            break
+        }
+    }
+
+    /// Stop the run without taking the panel down — the user still needs to see what
+    /// happened before it stopped.
+    private func cancelAgentRun() {
+        // A prompt on screen is a tool call suspended inside the proxy. It has to be
+        // answered, and the only answer that leaves nothing running is no.
+        if let continuation = pendingApproval {
+            pendingApproval = nil
+            continuation.resume(returning: .deny)
+        }
+        if agentRuntime.isRunning {
+            agentRuntime.cancel()        // emits `.cancelled`; the fold does the rest
+        } else {
+            applyAgentEvent(.cancelled)  // nothing to stop, but the run must still end
+        }
+    }
+
+    /// Expire the proxy's per-run state. Called on every ending, and the `beginRun` on
+    /// the next request clears it again — the grant is keyed by run id precisely so a
+    /// missed call here still cannot leak blanket approval into a follow-up.
+    private func endAgentRun() {
+        agentRunID = nil
+        guard let proxy = agentProxy else { return }
+        Task { await proxy.endRun() }
+    }
+
+    /// Answer whichever prompt is on screen. Buttons and keys converge here — the keys
+    /// carry no id because the user is answering what they can see.
+    func resolveApproval(decision: ApprovalDecision) {
+        guard let id = agentTranscript?.pendingApproval?.id else { return }
+        resolveApproval(id: id, decision: decision)
+    }
+
+    func resolveApproval(id: String, decision: ApprovalDecision) {
+        guard let continuation = pendingApproval else { return }
+        pendingApproval = nil
+        // Resume the held tool call *first*. Folding the event without resuming would
+        // show the user a decision the suspended call never received.
+        continuation.resume(returning: decision)
+        applyAgentEvent(.approvalResolved(id: id, decision: decision))
+    }
+
+    /// Tear the run and its conversation down: Escape on a settled run, or the
+    /// 15-minute idle expiry. Takes the panel with it — nothing hides it on a timer.
+    func endAgentConversation() {
+        agentRuntime.cancel()
+        agentRuntime.reset()
+        // A prompt on screen when the conversation ends is a tool call still suspended
+        // in the proxy. Denying it is the only ending that leaves nothing running.
+        if let continuation = pendingApproval {
+            pendingApproval = nil
+            continuation.resume(returning: .deny)
+        }
+        endAgentRun()
+        agentTranscript = nil
+        hotkeyMonitor.setApprovalPending(false)
+        let proxy = agentProxy
+        Task { await proxy?.shutdown(); await agentScratch.reset() }
+        agentProxy = nil
+    }
+
+    /// Delete anything a conversation left behind once it has been idle 15 minutes.
+    /// The store owns no clock of its own — every timer in this app is the
+    /// coordinator's, and a second one would be a second answer to "is this over".
+    func expireAgentConversationIfIdle() async {
+        guard agentTranscript != nil, !(agentTranscript?.phase.isActive ?? false) else { return }
+        if await agentScratch.expireIfIdle(agentRuntime.conversation) {
+            endAgentConversation()
+        }
     }
 
     // MARK: - Speech
@@ -880,6 +1091,55 @@ final class RecordingCoordinator {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             if Task.isCancelled { return }
             action()
+        }
+    }
+}
+
+// MARK: - The approval gate
+
+/// The coordinator is the gate because the gate needs the user, and the user is at the
+/// panel the coordinator drives. The proxy deliberately knows nothing about either.
+extension RecordingCoordinator: AgentApprovalGate {
+
+    /// Suspend the tool call until the user answers.
+    ///
+    /// The suspension is the enforcement: the downstream MCP server has not been sent
+    /// anything yet, so "deny" means the action never happened rather than that it was
+    /// undone. There is no timeout on purpose — a prompt that expires into a default
+    /// answer is a prompt that eventually answers itself.
+    func decide(_ request: AgentApprovalRequest) async -> ApprovalDecision {
+        // The proxy already checked this, but it is cheap and it is the difference
+        // between one forgotten `endRun` and a follow-up inheriting blanket approval.
+        if agentTranscript?.allowAllForRun == true { return .allowAll }
+
+        return await withCheckedContinuation { continuation in
+            // Only one can be outstanding: the proxy is suspended right here, so it
+            // cannot ask a second question until this returns. If one is somehow
+            // already parked, refuse the newcomer rather than orphan the old call.
+            guard pendingApproval == nil else {
+                continuation.resume(returning: .deny)
+                return
+            }
+            pendingApproval = continuation
+            applyAgentEvent(.approvalRequested(request))
+        }
+    }
+}
+
+// MARK: - Step reporting
+
+extension RecordingCoordinator: AgentProxyObserver {
+
+    /// `nonisolated` because the proxy is an actor calling this synchronously from its
+    /// own executor. Hopping here rather than making the proxy await the main actor
+    /// keeps a slow SwiftUI render off the path a tool call waits on.
+    nonisolated func proxyDidUpdate(call: AgentToolCall, status: AgentStepStatus, detail: String?) {
+        Task { @MainActor in
+            // The step id is the tool call id, which is also the approval id — that
+            // shared identity is what lets the panel draw "you denied this" against the
+            // step it applied to instead of in a list of its own.
+            let step = AgentStep(id: call.id, call: call, status: status, result: detail)
+            self.applyAgentEvent(.step(step))
         }
     }
 }

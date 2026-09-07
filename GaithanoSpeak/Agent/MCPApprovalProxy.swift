@@ -35,10 +35,6 @@ protocol AgentProxyObserver: Sendable {
     func proxyDidUpdate(call: AgentToolCall, status: AgentStepStatus, detail: String?)
 }
 
-/// Log.swift belongs to another slice of this feature, so this category is declared
-/// file-private rather than added there — two slices adding `Log.agent` in parallel is a
-/// merge conflict, and one of them silently winning is worse. Hoist it once both land.
-private let agentProxyLog = Logger(subsystem: Log.subsystem, category: "agent")
 
 // MARK: - The proxy
 
@@ -103,7 +99,7 @@ actor MCPApprovalProxy {
                 downstream[launch.id] = server
                 ingest(tools: try await server.listTools(), from: launch.id)
             } catch {
-                agentProxyLog.error("""
+                Log.agent.error("""
                     \(launch.id.rawValue, privacy: .public) MCP unavailable: \
                     \(error.localizedDescription, privacy: .public)
                     """)
@@ -155,7 +151,7 @@ actor MCPApprovalProxy {
                                                           sensitiveArguments: tool.sensitiveArguments)
             admitted += 1
         }
-        agentProxyLog.info("""
+        Log.agent.info("""
             \(server.rawValue, privacy: .public): \(admitted, privacy: .public) of \
             \(tools.count, privacy: .public) tools admitted
             """)
@@ -168,7 +164,7 @@ actor MCPApprovalProxy {
     func serve(_ transport: LineTransport) async {
         while let data = try? await transport.readMessage() {
             guard let message = try? JSONDecoder().decode(JSONRPCMessage.self, from: data) else {
-                agentProxyLog.error("proxy received a message it couldn't parse")
+                Log.agent.error("proxy received a message it couldn't parse")
                 continue
             }
             // Notifications carry no id and expect no reply; `notifications/initialized`
@@ -234,7 +230,7 @@ actor MCPApprovalProxy {
         // Second filter. The model may name a tool it was never shown; refusing here is
         // what makes the catalogue a boundary rather than a suggestion.
         guard let entry = catalogue[name], AgentToolAllowlist.isAllowed(name) else {
-            agentProxyLog.error("refused unlisted tool \(name, privacy: .public)")
+            Log.agent.error("refused unlisted tool \(name, privacy: .public)")
             return Self.toolError("""
                 `\(name)` is not available in this session. Only the tools listed by \
                 tools/list can be called, and there is no file, shell, or code-execution \
@@ -476,7 +472,7 @@ extension MCPApprovalProxy {
         do {
             listener = try UnixSocket.listen(path: path)
         } catch {
-            agentProxyLog.error("proxy couldn't open \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            Log.agent.error("proxy couldn't open \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
         }
         defer { close(listener) }

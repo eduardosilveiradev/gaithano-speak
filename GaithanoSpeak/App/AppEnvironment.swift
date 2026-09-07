@@ -115,8 +115,14 @@ final class AppEnvironment {
                 self?.coordinator.handleHotkey(event)
             }
         }
+        hotkeyMonitor.onApprovalEvent = { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.coordinator.resolveApproval(decision: event.decision)
+            }
+        }
         coordinator.onStateChange = { [weak self] state in
             guard let self else { return }
+            self.updateAgentPanel()
             self.overlay.update(state: state, level: self.coordinator.audioLevel,
                                 partial: self.coordinator.livePartial,
                                 arming: self.coordinator.armingProgress,
@@ -138,10 +144,31 @@ final class AppEnvironment {
         refreshLearnedTerms()
     }
 
+    /// Cheap when nothing changed: the controller compares the transcript it last drew
+    /// (`AgentTranscript` is `Equatable`) and only rebuilds the SwiftUI tree on a real
+    /// difference, so this is safe to call from the render loop.
+    private func updateAgentPanel() {
+        overlay.updateAgent(transcript: coordinator.agentTranscript) { [weak self] id, decision in
+            self?.coordinator.resolveApproval(id: id, decision: decision)
+        }
+    }
+
     /// Start system monitors once permissions are in place.
     func startMonitoring() {
         hotkeyMonitor.start()
         secureWatcher.start()
+        // The spec's "delete expired data on the next launch if an earlier shutdown
+        // couldn't". A crash mid-run is exactly when screenshots get left on disk, and
+        // it is also the case where nothing else will ever come back for them.
+        Task { await coordinator.agentScratch.purgeStale() }
+        // The conversation's 15-minute clock. One tick a minute is plenty for a
+        // fifteen-minute window, and it costs nothing when no agent has ever run.
+        Task { @MainActor in
+            while true {
+                try? await Task.sleep(for: .seconds(60))
+                await coordinator.expireAgentConversationIfIdle()
+            }
+        }
         // Keep the overlay's waveform live by polling the coordinator's level.
         Task { @MainActor in
             while true {
@@ -150,6 +177,7 @@ final class AppEnvironment {
                     // waveform, and arming bar. State transitions still drive show/
                     // hide via onStateChange, so idle can poll lazily.
                     coordinator.pushWaveformSample()
+                    updateAgentPanel()
                     overlay.update(state: coordinator.state, level: coordinator.audioLevel,
                                    partial: coordinator.livePartial,
                                    arming: coordinator.armingProgress,
@@ -160,6 +188,9 @@ final class AppEnvironment {
                                    history: coordinator.talkHistory)
                     try? await Task.sleep(nanoseconds: 16_666_666) // ~60 fps
                 } else {
+                    // The agent panel outlives the Flow Bar: it stays up through a
+                    // finished result and a follow-up, both of which are "idle" here.
+                    updateAgentPanel()
                     try? await Task.sleep(nanoseconds: 100_000_000) // idle: light poll
                 }
             }

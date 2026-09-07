@@ -37,6 +37,20 @@ enum MCPServerConfig {
     /// What to pass to `--allowed-tools`. One entry, because Claude Code prefixes every
     /// tool from an MCP server with the server's name, so this covers the whole proxy
     /// and nothing else.
+    /// Write `proxyConfigJSON()` to disk and return the path for `--mcp-config`.
+    ///
+    /// Rewritten on every run rather than cached: it embeds this app's own executable
+    /// path, and a bundle that moved — a rebuild, a drag to /Applications — would leave
+    /// a stale file pointing Claude Code at a binary that no longer exists, which
+    /// presents as Agent Mode having no tools and no reason why.
+    static func writeProxyConfig() -> String {
+        let url = supportDirectory.appendingPathComponent("agent-mcp.json")
+        try? FileManager.default.createDirectory(at: supportDirectory,
+                                                 withIntermediateDirectories: true)
+        try? proxyConfigJSON().data(using: .utf8)?.write(to: url, options: .atomic)
+        return url.path
+    }
+
     static let allowedToolsArgument = "mcp__\(MCPApprovalProxy.serverName)"
 
     /// What to pass to `--disallowed-tools`. Redundant with the allowlist and worth
