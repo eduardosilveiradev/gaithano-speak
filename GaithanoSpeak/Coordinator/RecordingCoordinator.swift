@@ -150,8 +150,11 @@ final class RecordingCoordinator {
 
     func handleHotkey(_ event: HotkeyEvent) {
         switch event {
-        case .optionDown: send(.optionDown)
-        case .optionUp: send(.optionUp)
+        case .chordDown(.dictation): send(.optionDown)
+        case .chordDown(.agent): send(.agentDown)
+        // Which chord came up doesn't matter: only one can be held at a time, and
+        // releasing it always means "I'm done speaking".
+        case .chordUp: send(.optionUp)
         case .otherKeyWhileOptionHeld: send(.otherKeyWhileOptionHeld)
         case .escPressed: send(.escPressed)
         case .copyAnswer:
@@ -271,6 +274,13 @@ final class RecordingCoordinator {
             // the window covers the whole ask and still can't outlive it.
             currentRaw = question
             answer(question)
+        case let .runAgent(task):
+            // Give the music back now rather than at `.answerReady`: an agent run is
+            // many steps long and possibly parked on an approval, and holding the
+            // pause across all of that would leave the user in silence for minutes.
+            media.resumeIfPaused()
+            currentRaw = task
+            runAgent(task)
         case let .handOffToClaudeCode(text):
             // Nothing of ours is thinking, so give the music back at the same moment
             // dictation does.
@@ -622,6 +632,22 @@ final class RecordingCoordinator {
                 self.send(.answerFailed(reason))
             }
         }
+    }
+
+    // MARK: - Agent
+
+    /// Hand the transcript to the agent.
+    ///
+    /// Not built yet — the chord, the reducer path, and the mode all run end to end,
+    /// but the Claude Code session, the MCP proxy, and the approval gate that
+    /// `AGENT_MODE_SPEC.md` describes do not exist. Failing loudly is the point:
+    /// quietly falling back to dictation would type a task meant for the agent into
+    /// whatever document the user happened to be looking at.
+    private func runAgent(_ task: String) {
+        Log.app.notice("Agent task received but Agent Mode is not implemented yet")
+        answerText = ""
+        streamStarted = false
+        send(.answerFailed("Agent Mode isn't available yet"))
     }
 
     // MARK: - Speech

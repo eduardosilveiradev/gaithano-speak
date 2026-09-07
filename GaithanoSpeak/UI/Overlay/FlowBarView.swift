@@ -282,6 +282,7 @@ struct FlowBarView: View {
     private var holdLabel: String {
         switch mode {
         case .talk: return "Asking…"
+        case .agent: return "Agent…"
         case .handoff: return "To Claude Code…"
         case .dictate: return "Listening…"
         }
@@ -289,7 +290,7 @@ struct FlowBarView: View {
 
     private var label: String {
         switch state {
-        case .idle: return "Press (⌥) to speak"
+        case .idle: return "Press right ⌃⌥ to speak"
         case .blockedSecureInput: return "Secure input active"
         case .recording(.hold, _): return holdLabel
         case .recording(.locked, _): return "Listening (hands-free)…"

@@ -5,8 +5,10 @@ import SpeakCore
 
 /// Events the hotkey layer emits (a subset of `DictationEvent`).
 enum HotkeyEvent: Sendable {
-    case optionDown
-    case optionUp
+    /// One of the two chords went down. Which one decides where the utterance goes,
+    /// and it is fixed at this moment — see `HotkeyChord`.
+    case chordDown(HotkeyChord)
+    case chordUp(HotkeyChord)
     case otherKeyWhileOptionHeld
     case escPressed
     /// ⌘C while an answer is on screen.
@@ -15,8 +17,8 @@ enum HotkeyEvent: Sendable {
     case insertAnswer
 }
 
-/// Watches for the push-to-talk key system-wide using an active `CGEventTap` on a
-/// dedicated run-loop thread. Never consumes the Option key (so ⌥-combos keep
+/// Watches for the two push-to-talk chords system-wide using an active `CGEventTap`
+/// on a dedicated run-loop thread. Never consumes a modifier (so ⌃⌥-combos keep
 /// working); consumes Esc only while a dictation is active.
 final class HotkeyMonitor: @unchecked Sendable {
     private var tapPort: CFMachPort?
@@ -28,17 +30,15 @@ final class HotkeyMonitor: @unchecked Sendable {
 
     // Configuration + live state, guarded by `lock`.
     private let lock = NSLock()
-    private var optionHeld = false
-    private var rightOptionHeld = false
-    private var rightControlHeld = false
+    /// The chord currently held, or nil. Also the `wasHeld` flag the keyDown path
+    /// reads to spot a modifier combo.
+    private var activeChord: HotkeyChord?
     private var active = false   // recording or processing — controls Esc consumption
     private var panelPresented = false  // an answer is on screen — enables ⌘C / ⌘⏎ / Esc
 
     /// Called on the main actor for each hotkey event.
     var onEvent: (@Sendable (HotkeyEvent) -> Void)?
 
-    private static let kRightOption: Int64 = 61
-    private static let kRightControl: Int64 = 62
     private static let kEsc: Int64 = 53
     private static let kC: Int64 = 8
     private static let kReturn: Int64 = 36
@@ -122,32 +122,26 @@ final class HotkeyMonitor: @unchecked Sendable {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
         lock.lock()
-        let wasHeld = self.optionHeld
+        let wasHeld = self.activeChord != nil
         let isActive = self.active
         let hasPanel = self.panelPresented
         lock.unlock()
 
         if type == .flagsChanged {
-            guard keyCode == Self.kRightOption || keyCode == Self.kRightControl else {
-                return false
-            }
+            // Recompute the whole picture from this event rather than tracking
+            // per-key transitions: `flagsChanged` carries the full modifier state, so
+            // a missed event (the tap being re-enabled after a timeout, a key released
+            // while another app had a higher-priority tap) heals on the next one
+            // instead of leaving a chord stuck down.
+            let held = Self.heldModifiers(in: event.flags)
             lock.lock()
-            if keyCode == Self.kRightOption {
-                rightOptionHeld = event.flags.contains(.maskAlternate)
-            } else {
-                rightControlHeld = event.flags.contains(.maskControl)
-            }
-            let nowDown = rightOptionHeld && rightControlHeld
-            if nowDown && !wasHeld {
-                optionHeld = true
-                lock.unlock()
-                emit(.optionDown)
-            } else if !nowDown && wasHeld {
-                optionHeld = false
-                lock.unlock()
-                emit(.optionUp)
-            } else {
-                lock.unlock()
+            let previous = activeChord
+            let resolved = ChordResolver.resolve(held: held, active: previous)
+            activeChord = resolved
+            lock.unlock()
+            if resolved != previous {
+                if let previous { emit(.chordUp(previous)) }
+                if let resolved { emit(.chordDown(resolved)) }
             }
             return false // never consume the modifier
         }
@@ -176,7 +170,7 @@ final class HotkeyMonitor: @unchecked Sendable {
                     return true
                 }
             }
-            // Any other key while our Option is physically held → modifier combo.
+            // Any other key while one of our chords is physically held → combo.
             if wasHeld {
                 emit(.otherKeyWhileOptionHeld)
             }
@@ -184,6 +178,23 @@ final class HotkeyMonitor: @unchecked Sendable {
         }
 
         return false
+    }
+
+    /// Read left/right Control and Option out of an event's flags.
+    ///
+    /// `.maskControl` / `.maskAlternate` are set by *either* side and so cannot tell
+    /// ⌃⌥ on the right from ⌃⌥ on the left — which is the entire distinction between
+    /// dictating and running the agent. The device-dependent bits below
+    /// (`NX_DEVICEL*` / `NX_DEVICER*`, from `IOKit/hidsystem/IOLLEvent.h`) are the
+    /// only place that side survives in a `CGEvent`.
+    private static func heldModifiers(in flags: CGEventFlags) -> HeldModifiers {
+        let raw = flags.rawValue
+        var held: HeldModifiers = []
+        if raw & 0x0000_0001 != 0 { held.insert(.leftControl) }
+        if raw & 0x0000_2000 != 0 { held.insert(.rightControl) }
+        if raw & 0x0000_0020 != 0 { held.insert(.leftOption) }
+        if raw & 0x0000_0040 != 0 { held.insert(.rightOption) }
+        return held
     }
 
     private func emit(_ event: HotkeyEvent) {
