@@ -23,12 +23,18 @@ struct FlowBarView: View {
     var showsAnswerPanel: Bool = false
     /// Earlier turns in this thread, oldest first.
     var history: [TalkTurn] = []
+    /// Whether the Agent Mode panel is on screen above the pill. It draws its own live
+    /// transcription, so the bubble below would be a second copy of the same words —
+    /// but the pill stays, because its waveform is the only cue that the mic is
+    /// actually hearing something and the panel has no equivalent.
+    var showsAgentPanel: Bool = false
 
     /// Show the transcription bubble only when there's live text and we're still
     /// in an active utterance.
     private var showsPartial: Bool {
         !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (state.isRecording || state.isProcessing)
+            && !showsAgentPanel
     }
 
     /// A follow-up has committed and we're capturing audio. Deliberately false during
