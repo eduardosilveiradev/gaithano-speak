@@ -225,6 +225,12 @@ final class ClaudeAgentRuntime {
                                        resume: conversation.sessionID,
                                        tier: tier,
                                        configuration: configuration)
+        // Made at init and emptied on reset, so by now it may be gone: a temp sweep, a
+        // purge, an expiry. `Process.run()` reports a missing cwd as `The file "<uuid>"
+        // doesn't exist`, which names nothing the user could act on — cheaper to
+        // guarantee the directory than to explain that error.
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+
         let proc = TurnProcess(executable: executable,
                                arguments: arguments,
                                workingDirectory: scratch,
@@ -449,8 +455,16 @@ final class ClaudeAgentRuntime {
     /// directory another feature deletes from on its own schedule. Same reason for
     /// keeping it empty: CLAUDE.md discovery walks up from the cwd, and a real project
     /// underneath would pull that project's instructions into "turn the lights off".
+    /// A sibling of `AgentScratchStore`'s root, never the same directory.
+    ///
+    /// The store owns `GaithanoSpeak/agent` and its `purgeStale()` deletes every entry
+    /// in it that isn't the store's own live conversation. This directory is not that
+    /// conversation, so sharing the root meant the store deleted the runtime's cwd at
+    /// launch and every turn afterwards failed with a bare UUID that named nothing.
+    /// Two owners, one root, and each purge correct on its own terms — so they are
+    /// separated instead, each purging only what it created.
     private static let scratchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("GaithanoSpeak/agent", isDirectory: true)
+        .appendingPathComponent("GaithanoSpeak/agent-runtime", isDirectory: true)
 
     private static func makeScratchDirectory() -> URL {
         let directory = scratchRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)

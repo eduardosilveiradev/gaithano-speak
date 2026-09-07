@@ -765,7 +765,14 @@ final class RecordingCoordinator {
         hotkeyMonitor.setApprovalPending(transcript.pendingApproval != nil)
         // Escape has to reach a run that is parked at an approval with the mic long
         // since closed, so "active" spans the whole run and not just the recording.
-        hotkeyMonitor.setActive(state.isRecording || state.isProcessing || transcript.phase.isActive)
+        //
+        // It spans the *finished* run too. The agent panel stays up after a failure to
+        // show what went wrong, and `showsAnswerPanel` is false in agent mode, so a
+        // transcript that had stopped being `.isActive` left Esc reaching neither the
+        // monitor's active branch nor its panel branch — the one key the panel tells
+        // the user to press did nothing, and the error stayed on screen until the next
+        // agent press. While a transcript exists, the panel is up and Esc closes it.
+        hotkeyMonitor.setActive(state.isRecording || state.isProcessing || agentTranscript != nil)
 
         // The reducer parked in `.processing(.answering)` when `.runAgent` was emitted
         // and has no other way out. Miss this and the dictation hotkey stays dead for
@@ -846,6 +853,8 @@ final class RecordingCoordinator {
         endAgentRun()
         agentTranscript = nil
         hotkeyMonitor.setApprovalPending(false)
+        // The panel is gone, so Esc belongs to whatever the user is typing into again.
+        hotkeyMonitor.setActive(state.isRecording || state.isProcessing)
         let proxy = agentProxy
         Task { await proxy?.shutdown(); await agentScratch.reset() }
         agentProxy = nil
