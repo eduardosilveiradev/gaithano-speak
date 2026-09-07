@@ -5,13 +5,19 @@ import Foundation
 /// Adding Control to whichever choice is active upgrades the utterance to Talk, so
 /// no option here may itself require Control — that gesture is spoken for.
 public enum HotkeyChoice: String, Codable, Sendable, CaseIterable {
+    case rightControlRightOption
     case eitherOption
     case leftOption
     case rightOption
     case fn
 
+    /// Legacy values remain decodable so existing preferences do not reset unrelated
+    /// settings, but the only selectable shortcut is the new fixed chord.
+    public static let allCases: [HotkeyChoice] = [.rightControlRightOption]
+
     public var displayName: String {
         switch self {
+        case .rightControlRightOption: return "Right Control + Right Option (⌃⌥)"
         case .eitherOption: return "Either Option (⌥)"
         case .leftOption: return "Left Option (⌥)"
         case .rightOption: return "Right Option (⌥)"
@@ -82,26 +88,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Whether holding Control alongside the dictation key asks a model instead of
     /// inserting text. Off sends every utterance down the normal dictation path.
     public var talkEnabled: Bool
-    /// Whether adding Shift lets the model click and type on the user's behalf.
-    ///
-    /// On by default: this is a personal, directly-distributed tool whose owner asked
-    /// for the gesture to be armed, and leaving it off made ⌃⇧⌥ silently behave like
-    /// ⌃⌥ — a worse failure than the one the default was guarding against, since the
-    /// user can't tell which mode they're in. What actually keeps this safe is
-    /// `AgentRiskPolicy`, not the default, and that is unchanged.
-    public var agentEnabled: Bool
-    /// Start every agent run already in auto mode, so risky steps never stop to ask.
-    ///
-    /// Off by default and kept separate from `agentEnabled` because it removes the
-    /// feature's only interactive rail. `.blocked` actions (typing while a password
-    /// field has focus) are still refused — `AgentSession` checks those ahead of
-    /// `autoConfirm`, and that ordering is not negotiable.
-    public var agentAutoConfirm: Bool
     /// Point ⌃⌥ at a running Claude Code session instead of a model of ours: the
     /// utterance is typed into the terminal hosting it rather than answered.
     ///
-    /// Outranks `agentEnabled`, so with this on there is no way to reach the agent or
-    /// a plain question — one gesture, one destination. On by default because it's the
+    /// With this on there is no way to reach a plain question — one gesture, one
+    /// destination. On by default because it's the
     /// gesture's owner who asked for it, and because it is the only ⌃⌥ path that keeps
     /// working when Vertex doesn't. There is deliberately no fallback: if no Claude
     /// Code session can be found the utterance fails with a notice rather than quietly
@@ -122,6 +113,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var talkProvider: TalkProviderID
     /// Model id for the Talk provider. Vertex default is `gemini-3.6-flash`.
     public var talkModel: String
+    /// Model passed to `claude --model` for the `.claudeCode` Talk provider. Separate
+    /// from `formatterClaudeModel` because the two jobs pull in opposite directions:
+    /// the formatter is on the latency path of every dictation and wants the fastest
+    /// model that follows instructions, while an answer is read rather than typed and
+    /// is worth waiting an extra second for.
+    public var talkClaudeModel: String
     /// GCP project for Vertex. Empty falls back to the project gcloud's Application
     /// Default Credentials were set up against, so the usual case needs no setup.
     public var vertexProjectID: String
@@ -134,7 +131,33 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// reasoning tokens dominate latency at that length.
     public var talkThinkingBudget: Int
 
-    public init(hotkey: HotkeyChoice = .eitherOption,
+    // MARK: Speech
+
+    /// Read Talk answers out loud when they arrive.
+    ///
+    /// Off by default, and deliberately so. This app's whole gesture is *press, speak,
+    /// get text* — it is used in meetings, in shared offices, and next to sleeping
+    /// people, and a setting that makes the machine talk back is not one to switch on
+    /// for someone. It also only ever applies to answers: dictation is never spoken,
+    /// because reading a user's own words back at them as they're typed into a document
+    /// is noise, not a feature.
+    public var speechEnabled: Bool
+    public var speechEngine: SpeechEngineID
+    /// Qwen3-TTS speaker. Ignored by the system engine, which uses the voice chosen in
+    /// macOS Settings.
+    public var speechVoice: SpeechVoice
+    /// Interpreter with `mlx-audio` importable. Blank searches the usual places — see
+    /// `SpeechConfig.candidateInterpreters`. Needed because Qwen3-TTS is a Python model
+    /// and there is no MLX Swift port of it to link against.
+    public var speechPythonPath: String
+    /// Words per minute for the system voice. Qwen paces itself and ignores this.
+    public var speechRate: Double
+    /// Stop speaking past this many characters. Qwen synthesises at roughly 1×
+    /// realtime, so an unclamped six-paragraph answer means a minute of talking with
+    /// only Esc to stop it.
+    public var speechMaxCharacters: Int
+
+    public init(hotkey: HotkeyChoice = .rightControlRightOption,
                 engine: EngineID = .parakeet,
                 formattingEnabled: Bool = true,
                 preferredFormatter: FormatterID = .foundationModel,
@@ -150,17 +173,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 dictionaryLearningEnabled: Bool = true,
                 dictionaryLearningAutoAccept: Bool = false,
                 talkEnabled: Bool = true,
-                agentEnabled: Bool = true,
-                agentAutoConfirm: Bool = false,
                 claudeCodeHandoffEnabled: Bool = true,
                 claudeCodeSubmitOnPaste: Bool = true,
                 claudeCodeAppBundleID: String = "",
                 talkProvider: TalkProviderID = .vertexGemini,
                 talkModel: String = "gemini-3.6-flash",
+                talkClaudeModel: String = "sonnet",
                 vertexProjectID: String = "",
                 vertexRegion: String = "global",
                 talkVisionEnabled: Bool = false,
-                talkThinkingBudget: Int = 0) {
+                talkThinkingBudget: Int = 0,
+                speechEnabled: Bool = false,
+                speechEngine: SpeechEngineID = .qwen3,
+                speechVoice: SpeechVoice = .ryan,
+                speechPythonPath: String = "",
+                speechRate: Double = 175,
+                speechMaxCharacters: Int = 600) {
         self.hotkey = hotkey
         self.engine = engine
         self.formattingEnabled = formattingEnabled
@@ -177,17 +205,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.dictionaryLearningEnabled = dictionaryLearningEnabled
         self.dictionaryLearningAutoAccept = dictionaryLearningAutoAccept
         self.talkEnabled = talkEnabled
-        self.agentEnabled = agentEnabled
-        self.agentAutoConfirm = agentAutoConfirm
         self.claudeCodeHandoffEnabled = claudeCodeHandoffEnabled
         self.claudeCodeSubmitOnPaste = claudeCodeSubmitOnPaste
         self.claudeCodeAppBundleID = claudeCodeAppBundleID
         self.talkProvider = talkProvider
         self.talkModel = talkModel
+        self.talkClaudeModel = talkClaudeModel
         self.vertexProjectID = vertexProjectID
         self.vertexRegion = vertexRegion
         self.talkVisionEnabled = talkVisionEnabled
         self.talkThinkingBudget = talkThinkingBudget
+        self.speechEnabled = speechEnabled
+        self.speechEngine = speechEngine
+        self.speechVoice = speechVoice
+        self.speechPythonPath = speechPythonPath
+        self.speechRate = speechRate
+        self.speechMaxCharacters = speechMaxCharacters
     }
 
     public static let `default` = AppSettings()
@@ -217,17 +250,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
         dictionaryLearningEnabled = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningEnabled) ?? d.dictionaryLearningEnabled
         dictionaryLearningAutoAccept = try c.decodeIfPresent(Bool.self, forKey: .dictionaryLearningAutoAccept) ?? d.dictionaryLearningAutoAccept
         talkEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkEnabled) ?? d.talkEnabled
-        agentEnabled = try c.decodeIfPresent(Bool.self, forKey: .agentEnabled) ?? d.agentEnabled
-        agentAutoConfirm = try c.decodeIfPresent(Bool.self, forKey: .agentAutoConfirm) ?? d.agentAutoConfirm
         claudeCodeHandoffEnabled = try c.decodeIfPresent(Bool.self, forKey: .claudeCodeHandoffEnabled) ?? d.claudeCodeHandoffEnabled
         claudeCodeSubmitOnPaste = try c.decodeIfPresent(Bool.self, forKey: .claudeCodeSubmitOnPaste) ?? d.claudeCodeSubmitOnPaste
         claudeCodeAppBundleID = try c.decodeIfPresent(String.self, forKey: .claudeCodeAppBundleID) ?? d.claudeCodeAppBundleID
         talkProvider = (try? c.decodeIfPresent(TalkProviderID.self, forKey: .talkProvider)) ?? d.talkProvider
         talkModel = try c.decodeIfPresent(String.self, forKey: .talkModel) ?? d.talkModel
+        talkClaudeModel = try c.decodeIfPresent(String.self, forKey: .talkClaudeModel) ?? d.talkClaudeModel
         vertexProjectID = try c.decodeIfPresent(String.self, forKey: .vertexProjectID) ?? d.vertexProjectID
         vertexRegion = try c.decodeIfPresent(String.self, forKey: .vertexRegion) ?? d.vertexRegion
         talkVisionEnabled = try c.decodeIfPresent(Bool.self, forKey: .talkVisionEnabled) ?? d.talkVisionEnabled
         talkThinkingBudget = try c.decodeIfPresent(Int.self, forKey: .talkThinkingBudget) ?? d.talkThinkingBudget
+        speechEnabled = try c.decodeIfPresent(Bool.self, forKey: .speechEnabled) ?? d.speechEnabled
+        speechEngine = (try? c.decodeIfPresent(SpeechEngineID.self, forKey: .speechEngine)) ?? d.speechEngine
+        speechVoice = (try? c.decodeIfPresent(SpeechVoice.self, forKey: .speechVoice)) ?? d.speechVoice
+        speechPythonPath = try c.decodeIfPresent(String.self, forKey: .speechPythonPath) ?? d.speechPythonPath
+        speechRate = try c.decodeIfPresent(Double.self, forKey: .speechRate) ?? d.speechRate
+        speechMaxCharacters = try c.decodeIfPresent(Int.self, forKey: .speechMaxCharacters) ?? d.speechMaxCharacters
     }
 }
 
@@ -241,14 +279,33 @@ extension AppSettings {
     /// fields double as the fallback target when a cloud provider is unusable, so
     /// they're always populated regardless of which provider is selected.
     public var talkConfig: TalkConfig {
-        TalkConfig(
+        let model: String
+        switch talkProvider {
+        case .vertexGemini: model = talkModel
+        case .claudeCode: model = talkClaudeModel
+        case .localServer: model = localServerModel
+        }
+        return TalkConfig(
             provider: talkProvider,
-            model: talkProvider == .vertexGemini ? talkModel : localServerModel,
+            model: model,
             endpoint: localServerURL,
+            // The same binary the `.claude` formatter uses; there is only one on the
+            // machine, so there is only one place to configure it.
+            executablePath: formatterClaudePath,
             projectID: vertexProjectID.isEmpty ? nil : vertexProjectID,
             region: vertexRegion.isEmpty ? "global" : vertexRegion,
             thinkingBudget: talkThinkingBudget
         )
+    }
+
+    /// Resolve the speech settings into the config the synthesiser layer takes.
+    public var speechConfig: SpeechConfig {
+        SpeechConfig(enabled: speechEnabled,
+                     engine: speechEngine,
+                     voice: speechVoice,
+                     pythonPath: speechPythonPath,
+                     rate: speechRate,
+                     maxCharacters: speechMaxCharacters)
     }
 }
 

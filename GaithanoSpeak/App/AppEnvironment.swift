@@ -51,6 +51,15 @@ final class AppEnvironment {
         applySettings(copy)
     }
 
+    /// Say a sample line with the current voice settings.
+    ///
+    /// Without this the only way to find out that the Python path is wrong is to ask a
+    /// question and notice nothing happened — and a silent voice is indistinguishable
+    /// from an answer that failed, which is the worst way to debug either.
+    func speakSample() {
+        coordinator.speakSample()
+    }
+
     /// Recent dictations for the history view (refreshed on demand).
     var history: [DictationRecord] = []
     var dictionaryEntries: [DictionaryEntry] = []
@@ -100,7 +109,6 @@ final class AppEnvironment {
     }
 
     private func wire() {
-        hotkeyMonitor.updateChoice(settings.hotkey)
         hotkeyMonitor.onEvent = { [weak self] event in
             // `emit` already dispatches to the main queue before invoking this.
             MainActor.assumeIsolated {
@@ -116,8 +124,7 @@ final class AppEnvironment {
                                 mode: self.coordinator.mode,
                                 answerText: self.coordinator.answerText,
                                 showsAnswerPanel: self.coordinator.showsAnswerPanel,
-                                history: self.coordinator.talkHistory,
-                                agent: self.coordinator.agentSession)
+                                history: self.coordinator.talkHistory)
         }
         secureWatcher.onChange = { [weak self] active in
             self?.coordinator.setSecureInput(active)
@@ -150,8 +157,7 @@ final class AppEnvironment {
                                    mode: coordinator.mode,
                                    answerText: coordinator.answerText,
                                    showsAnswerPanel: coordinator.showsAnswerPanel,
-                                   history: coordinator.talkHistory,
-                                   agent: coordinator.agentSession)
+                                   history: coordinator.talkHistory)
                     try? await Task.sleep(nanoseconds: 16_666_666) // ~60 fps
                 } else {
                     try? await Task.sleep(nanoseconds: 100_000_000) // idle: light poll

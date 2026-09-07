@@ -78,18 +78,13 @@ final class RecordingCoordinator {
     private var contextTask: Task<Void, Never>?
     private var answerTask: Task<Void, Never>?
 
-    /// Built lazily, on the first agent run, so the ordinary dictation path never
-    /// constructs it. Readable so the overlay can render its step list directly —
-    /// mirroring it into a second observable would just be a way to show something
-    /// other than what is actually about to happen.
-    private(set) var agentRunner: AgentRunner?
-
-    /// The step list to draw, or nil when this utterance isn't an agent one. The
-    /// runner is kept between runs, so without the mode check a later Talk answer
-    /// would appear underneath the previous run's steps.
-    var agentSession: AgentSession? {
-        mode == .agent ? agentRunner?.session : nil
-    }
+    /// Built on first use and torn down when the engine changes or speech is switched
+    /// off — the Qwen sidecar holds four gigabytes, so it must not outlive the setting.
+    private var speech: (any SpeechOutput)?
+    private var speechEngine: SpeechEngineID?
+    /// Cuts the answer stream into speakable sentences. Non-nil only while a streamed
+    /// answer is in flight; an agent summary arrives whole and leaves this alone.
+    private var answerSplitter: SpeechText.SentenceSplitter?
 
     // Cancellable timers / tasks.
     private var minHoldTask: Task<Void, Never>?
@@ -159,30 +154,6 @@ final class RecordingCoordinator {
         case .optionUp: send(.optionUp)
         case .otherKeyWhileOptionHeld: send(.otherKeyWhileOptionHeld)
         case .escPressed: send(.escPressed)
-        case .talkModifierEngaged:
-            guard settings.talkEnabled else { return }
-            // Handoff claims the gesture outright: nothing of ours answers, so there's
-            // no context to capture and no panel to fill.
-            if settings.claudeCodeHandoffEnabled {
-                send(.handoffModifierEngaged)
-                return
-            }
-            // Capture what the user is looking at NOW, while they're still speaking,
-            // so a screenshot + AX read never shows up in answer latency.
-            captureTalkContextIfNeeded()
-            send(.talkModifierEngaged)
-        case .agentModifierEngaged:
-            // Requires both consents: Talk off means the gesture never got as far as
-            // a model, and agent off means it stays a question rather than an action —
-            // which is the only way to reach plain Talk now that ⌃⌥ arms the agent.
-            // Handoff outranks both; it already claimed this utterance above.
-            guard settings.talkEnabled, settings.agentEnabled,
-                  !settings.claudeCodeHandoffEnabled else { return }
-            send(.agentModifierEngaged)
-        case .agentConfirm:
-            agentRunner?.confirm()
-        case .agentAuto:
-            agentRunner?.enableAuto()
         case .copyAnswer:
             SmartInserter.copyToClipboard(answerText)
         case .insertAnswer:
@@ -196,7 +167,6 @@ final class RecordingCoordinator {
 
     func updateSettings(_ new: AppSettings) {
         settings = new
-        hotkeyMonitor.updateChoice(new.hotkey)
     }
 
     func reloadDictionary() {
@@ -301,14 +271,6 @@ final class RecordingCoordinator {
             // the window covers the whole ask and still can't outlive it.
             currentRaw = question
             answer(question)
-        case let .runAgent(task):
-            // The agent does resume now, and for the opposite reason: its
-            // `.answerPresented` doesn't arrive until the entire run ends — many steps,
-            // possibly parked on a confirmation the user hasn't answered. Waiting for
-            // that would leave the music off for minutes.
-            media.resumeIfPaused()
-            currentRaw = task
-            runAgent(task)
         case let .handOffToClaudeCode(text):
             // Nothing of ours is thinking, so give the music back at the same moment
             // dictation does.
@@ -320,7 +282,11 @@ final class RecordingCoordinator {
             // Taking the panel down ends the run: the step list was the only place the
             // user could see what was happening, so leaving it clicking away behind a
             // closed panel is exactly the thing this feature must never do.
-            stopAgent()
+            // Same reasoning for the voice. Esc dismissing the answer and the machine
+            // carrying on reading it aloud would leave the user with no way to shut it
+            // up short of quitting.
+            speech?.stop()
+            answerSplitter = nil
             answerText = ""
             streamStarted = false
         case .endTalkThread:
@@ -349,6 +315,11 @@ final class RecordingCoordinator {
         if settings.formattingEnabled && settings.preferredFormatter == .foundationModel {
             formatter.prewarm()
         }
+        // Same bargain for the voice, and a much longer one to hide: Qwen3-TTS takes
+        // ~13s to load. Warming at the start of every recording — not just a Talk one —
+        // is deliberate, because the mode isn't decided until the modifier is read, and
+        // by then the user is already mid-sentence.
+        prewarmSpeech()
         // Start the output-level tap as early as possible. With `minHold` at 0 the
         // pause decision lands on the very next hop, well before the tap's first
         // buffer, so `MediaPlaybackController` waits for a real reading rather than
@@ -607,6 +578,11 @@ final class RecordingCoordinator {
         // `answerText` is deliberately left alone — a follow-up keeps the previous
         // answer visible until its own first token arrives.
         streamStarted = false
+        // Fresh splitter per answer, and stop whatever the last one was still saying.
+        speech?.stop()
+        answerSplitter = settings.speechEnabled
+            ? SpeechText.SentenceSplitter(limit: settings.speechMaxCharacters)
+            : nil
         talkHistory = talkThread
         // If the screenshot is still being captured, wait for it — but never let a
         // stuck capture hold the answer hostage.
@@ -638,6 +614,7 @@ final class RecordingCoordinator {
                 self.talkThread = thread + [TalkTurn(role: .assistant, text: full)]
                 self.answerText = full
                 self.send(.answerReady)
+                self.speakAnswer(full)
             } catch {
                 if Task.isCancelled { return }
                 let reason = Self.describe(error)
@@ -647,42 +624,84 @@ final class RecordingCoordinator {
         }
     }
 
-    // MARK: - Agent
+    // MARK: - Speech
 
-    /// Hand the transcript to the agent and let it drive.
+    /// Read an answer out loud, if the user asked for that.
     ///
-    /// Unlike `answer`, this has no local fallback. The local server has no function
-    /// calling, and an agent that can't call tools is not a degraded agent — it's a
-    /// model narrating clicks it will never make, at the price of a real run.
-    private func runAgent(_ task: String) {
-        let runner = agentRunner ?? {
-            let created = AgentRunner(model: AgentModel(credentials: credentials,
-                                                        config: settings.talkConfig))
-            created.onConfirmationChanged = { [weak self] awaiting in
-                self?.hotkeyMonitor.setAgentAwaitingConfirmation(awaiting)
-            }
-            created.onEnded = { [weak self] summary in
-                guard let self else { return }
-                self.hotkeyMonitor.setAgentAwaitingConfirmation(false)
-                self.answerText = summary
-                self.send(.answerReady)
-            }
-            agentRunner = created
-            return created
-        }()
+    /// Answers only. Three paths deliberately never reach here:
+    ///
+    /// * **Dictation.** The text is going into the user's document as they watch. Saying
+    ///   it back is noise, and this is the one path where latency is the whole product.
+    /// * **The Claude Code handoff.** ⌃⌥ with `claudeCodeHandoffEnabled` types into a
+    ///   terminal; there is no answer, only a prompt the user is about to watch run.
+    /// * **`ClaudeCLIFormatter`.** It drives `claude -p` non-interactively as part of
+    ///   formatting, and its output is dictation — see above. Nothing on that path calls
+    ///   this, and the gate below means that even if something did, it would stay silent
+    ///   unless the user had explicitly switched speech on.
+    private func speakAnswer(_ text: String) {
+        let config = settings.speechConfig
+        guard config.enabled else { return }
 
-        answerText = ""
-        streamStarted = true   // the panel is showing steps, not a stream to swap in
-        runner.start(task: task, autoConfirm: settings.agentAutoConfirm)
+        // A streamed answer has already been spoken sentence by sentence; all that is
+        // left is whatever came after the last sentence break. Re-speaking the whole
+        // thing here is the obvious bug this guards against — it would read the answer
+        // twice, the second time over the top of the first.
+        if var splitter = answerSplitter {
+            let tail = splitter.finish()
+            answerSplitter = nil
+            if let tail, let output = speechOutput(for: config) {
+                output.enqueue(tail, config: config)
+            }
+            return
+        }
+
+        // Not streamed — an agent summary arrives whole.
+        guard let spoken = SpeechText.spoken(from: text, limit: config.maxCharacters) else {
+            return
+        }
+        speechOutput(for: config)?.speak(spoken, config: config)
+    }
+
+    /// Speak a fixed line, for the Test voice button in Settings. Ignores
+    /// `speechEnabled` on purpose: the user pressed a button that says "test", and
+    /// making them switch the feature on first to hear whether it works is backwards.
+    func speakSample() {
+        var config = settings.speechConfig
+        config.enabled = true
+        speechOutput(for: config)?.speak(
+            "Gaithano Speak is ready. This is how answers will sound.", config: config)
+    }
+
+    /// Start the engine loading before there is anything to say.
+    ///
+    /// Qwen takes ~13s to become usable, so doing this lazily would mean the first
+    /// answer of every session is read out long after the user has finished reading it
+    /// themselves. Called when a Talk or agent utterance *starts*, which is the same
+    /// bargain `formatter.prewarm()` makes on the dictation path.
+    private func prewarmSpeech() {
+        let config = settings.speechConfig
+        guard config.enabled else { return }
+        speechOutput(for: config)?.prewarm(config: config)
+    }
+
+    /// Build the synthesiser, replacing it if the engine changed. Switching away from
+    /// Qwen shuts its sidecar down rather than leaving the weights resident.
+    private func speechOutput(for config: SpeechConfig) -> (any SpeechOutput)? {
+        if let speech, speechEngine == config.engine { return speech }
+        (speech as? QwenSpeechOutput)?.shutdown()
+        let created: any SpeechOutput
+        switch config.engine {
+        case .system: created = SystemSpeechOutput()
+        case .qwen3: created = QwenSpeechOutput()
+        }
+        speech = created
+        speechEngine = config.engine
+        return created
     }
 
     /// Idempotent, and safe to call when nothing is running — every panel-dismissal
     /// path goes through it.
-    private func stopAgent() {
-        guard let agentRunner else { return }
-        agentRunner.stop()
-        hotkeyMonitor.setAgentAwaitingConfirmation(false)
-    }
+
 
     /// Run the configured provider, falling back to the local server when a cloud
     /// provider is unusable — an unconfigured or offline Vertex shouldn't mean no
@@ -695,15 +714,20 @@ final class RecordingCoordinator {
             Task { @MainActor in self?.appendAnswerDelta(delta) }
         }
 
-        guard config.provider == .vertexGemini else {
+        let cloud: TalkProvider
+        switch config.provider {
+        case .localServer:
             return try await local.answer(request, config: config, onDelta: onDelta)
+        case .vertexGemini:
+            cloud = VertexTalkProvider(credentials: credentials)
+        case .claudeCode:
+            cloud = ClaudeCodeTalkProvider()
         }
 
-        let vertex = VertexTalkProvider(credentials: credentials)
         do {
-            return try await vertex.answer(request, config: config, onDelta: onDelta)
+            return try await cloud.answer(request, config: config, onDelta: onDelta)
         } catch let error as TalkError where error.isFallbackWorthy {
-            Log.talk.notice("Vertex unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
+            Log.talk.notice("\(config.provider.rawValue, privacy: .public) unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
             // Drop anything the failed attempt streamed so the two don't concatenate.
             streamStarted = false
             var localConfig = config
@@ -722,6 +746,23 @@ final class RecordingCoordinator {
         // appends to it.
         if !streamStarted { answerText = ""; streamStarted = true }
         answerText += delta
+        speakStreamingDelta(delta)
+    }
+
+    /// Feed the stream to the voice a sentence at a time.
+    ///
+    /// Qwen synthesises at about 1× realtime, so speaking only on `.answerReady` means
+    /// the user waits for the whole answer to arrive and then waits again for it to be
+    /// read. Splitting on sentences overlaps the two, and turns the wait into the
+    /// length of the first sentence.
+    private func speakStreamingDelta(_ delta: String) {
+        let config = settings.speechConfig
+        guard config.enabled, var splitter = answerSplitter else { return }
+        defer { answerSplitter = splitter }
+        guard let output = speechOutput(for: config) else { return }
+        for sentence in splitter.accept(delta) {
+            output.enqueue(sentence, config: config)
+        }
     }
 
     /// Insert the answer at the cursor (⌘⏎), then dismiss the panel.

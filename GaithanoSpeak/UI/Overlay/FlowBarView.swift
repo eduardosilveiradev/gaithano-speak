@@ -23,8 +23,6 @@ struct FlowBarView: View {
     var showsAnswerPanel: Bool = false
     /// Earlier turns in this thread, oldest first.
     var history: [TalkTurn] = []
-    /// The live agent run, when this utterance was an agent task.
-    var agent: AgentSession?
 
     /// Show the transcription bubble only when there's live text and we're still
     /// in an active utterance.
@@ -76,8 +74,6 @@ struct FlowBarView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if let agent { agentSteps(agent) }
-
                     if !answerText.isEmpty {
                         MarkdownText(source: answerText)
                             .foregroundStyle(.white.opacity(followUpActive ? 0.45 : 1))
@@ -91,9 +87,7 @@ struct FlowBarView: View {
             }
             .frame(maxHeight: 300)
 
-            if let agent, case let .awaitingConfirmation(_, reason) = agent.status {
-                confirmationBar(reason: reason)
-            } else if !followUpActive {
+            if !followUpActive {
                 HStack(spacing: 12) {
                     hint("⌘C", "Copy")
                     hint("⌘↩", "Insert")
@@ -169,62 +163,7 @@ struct FlowBarView: View {
         }
     }
 
-    /// What the agent has done, and what it's about to do. Every executed step stays
-    /// listed: the user needs to be able to see what happened on their machine, not
-    /// just the latest frame of it.
-    private func agentSteps(_ session: AgentSession) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(session.steps.enumerated()), id: \.offset) { _, step in
-                HStack(alignment: .top, spacing: 7) {
-                    Image(systemName: step.confirmed ? "checkmark.shield" : "checkmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.35))
-                        .frame(width: 12)
-                    Text(step.action.summary)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if case let .awaitingConfirmation(action, _) = session.status {
-                HStack(alignment: .top, spacing: 7) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.orange)
-                        .frame(width: 12)
-                    Text(action.summary)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else if case let .executing(action) = session.status {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini).tint(.white).frame(width: 12)
-                    Text(action.summary)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.85))
-                }
-            }
-        }
-    }
 
-    /// The three ways out of a pending step. `auto` is listed alongside the others
-    /// rather than tucked away, because a user who is going to hold Return down
-    /// anyway is better off saying so once, knowingly.
-    private func confirmationBar(reason: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(reason)
-                .font(.system(size: 10))
-                .foregroundStyle(.orange.opacity(0.9))
-            HStack(spacing: 12) {
-                hint("↩", "Allow")
-                hint("A", "Auto")
-                hint("esc", "Stop")
-            }
-        }
-        .padding(.top, 2)
-    }
 
     private func hint(_ key: String, _ action: String) -> some View {
         HStack(spacing: 4) {
@@ -342,7 +281,7 @@ struct FlowBarView: View {
     /// going — a handoff types into another app entirely, so say so before it does.
     private var holdLabel: String {
         switch mode {
-        case .talk, .agent: return "Asking…"
+        case .talk: return "Asking…"
         case .handoff: return "To Claude Code…"
         case .dictate: return "Listening…"
         }

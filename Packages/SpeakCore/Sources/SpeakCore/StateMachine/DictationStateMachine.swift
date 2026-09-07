@@ -15,12 +15,6 @@ public enum UtteranceMode: Equatable, Sendable {
     case dictate
     /// Control+Option — transcribe, ask a model, show the answer in a panel.
     case talk
-    /// Control+Shift+Option — transcribe, then let the model act on the screen.
-    ///
-    /// A strict upgrade of `.talk`: same capture, same panel, but the model gets
-    /// tools. It is a separate mode rather than a flag on `.talk` because the
-    /// difference is not cosmetic — one reads the screen, the other changes it.
-    case agent
     /// Control+Option, when the user has pointed that gesture at Claude Code —
     /// transcribe, then type the words into the terminal running a Claude Code
     /// session and (optionally) submit them.
@@ -139,11 +133,6 @@ public enum DictationEvent: Equatable, Sendable {
     /// May arrive at `optionDown` (Control already held) or mid-capture (Control
     /// pressed after Option). Sticky: releasing Control does not revert it.
     case talkModifierEngaged
-    /// Shift joined Control+Option — this utterance is an agent task. Sticky in the
-    /// same way, and one-directional: an utterance can be upgraded to `.agent` but
-    /// never downgraded back to `.talk`, so letting go of Shift mid-sentence can't
-    /// quietly turn an approved action run into something else.
-    case agentModifierEngaged
     /// Control joined Option and the user has pointed that gesture at Claude Code.
     /// Sticky like the other two, and it outranks them: the coordinator only emits
     /// one of the three, but the reducer refuses the demotion anyway so an ordering
@@ -177,8 +166,6 @@ public enum Effect: Equatable, Sendable {
     case playStopSound
     /// Ask the configured Talk provider, streaming the answer into the panel.
     case answer(String)
-    /// Hand the transcript to the agent runner, which will act on the screen.
-    case runAgent(String)
     /// Type the transcript into the terminal running Claude Code. Carries the raw
     /// transcript; the coordinator cleans it on the way out — see
     /// `RecordingCoordinator.handOff(_:)` for why the model formatter is skipped.
@@ -274,13 +261,7 @@ public struct DictationStateMachine: Sendable {
         if case .talkModifierEngaged = event {
             // Never demote an already-upgraded utterance: Control and Shift arrive as
             // separate events, so a Control that lands after Shift must not undo it.
-            if state.isRecording, mode != .agent, mode != .handoff { mode = .talk }
-            return []
-        }
-        if case .agentModifierEngaged = event {
-            // Handoff outranks the agent. The coordinator emits only one of these, so
-            // this can't fire today — it's here so that stops being load-bearing.
-            if state.isRecording, mode != .handoff { mode = .agent }
+            if state.isRecording, mode != .handoff { mode = .talk }
             return []
         }
         if case .handoffModifierEngaged = event {
@@ -465,13 +446,6 @@ public struct DictationStateMachine: Sendable {
                 hasAnswer = true
                 state = .processing(.answering)
                 return [.answer(trimmed)]
-            case .agent:
-                // Shares `.answering` and the panel with Talk: from the reducer's side
-                // both are "something long is running and the panel is showing it".
-                // What differs is who executes the effect.
-                hasAnswer = true
-                state = .processing(.answering)
-                return [.runAgent(trimmed)]
             case .handoff:
                 // Nothing comes back, so this ends like a dictation rather than like a
                 // Talk question: `.inserting` → `.insertFinished` → `.persist`. Any
