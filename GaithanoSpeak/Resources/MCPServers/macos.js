@@ -64,6 +64,82 @@ function run(file, args, timeout = DEFAULT_TIMEOUT) {
 const osa = (script, args = []) =>
   run("osascript", ["-e", script, "--", ...args.map(String)]);
 
+// MARK: - Displays
+//
+// Screen coordinates are the whole reason this section exists. macOS lays every
+// display out in one global plane whose origin is the top-left of the *main*
+// display, so a second monitor to the left occupies negative x. On the machine this
+// was written against that plane runs from x = -1728 to x = 5360.
+//
+// Handing a model a bare screenshot and taking back a pair of numbers cannot work in
+// that plane: nothing in the image says which display it is, where that display sits,
+// or whether its pixels are points. Every one of those omissions puts the click on a
+// different monitor, silently, because a wrong-but-valid coordinate is still a click.
+//
+// So coordinates crossing this boundary are always *display-local* points, and this
+// file does the conversion. `capture_screen` says which display it captured and
+// normalises the image so one pixel is one point; `click_coordinate` takes a position
+// in that image, adds the display's origin, and refuses anything outside its bounds.
+
+/// Every display, main first, in Quartz coordinates (origin top-left of the main
+/// display, y increasing downward) — the space `System Events` clicks in.
+///
+/// Read through AppKit rather than a helper binary: `NSScreen` is the only source of
+/// per-display origin *and* backing scale that needs no extra install, and reaching it
+/// this way asks for no Automation permission, because nothing is being scripted — the
+/// framework is loaded in-process by `osascript` itself.
+async function displays() {
+  // `NSScreen` frames are Cocoa: origin bottom-left, y increasing upward. Converted
+  // below rather than here, so the two coordinate systems never overlap in one scope.
+  const raw = await run("osascript", ["-e", `use framework "AppKit"
+use scripting additions
+set out to ""
+repeat with s in (current application's NSScreen's screens() as list)
+  set f to s's frame()
+  set out to out & ((item 1 of item 1 of f) as integer) & "," & ((item 2 of item 1 of f) as integer) & "," & ((item 1 of item 2 of f) as integer) & "," & ((item 2 of item 2 of f) as integer) & "," & (s's backingScaleFactor() as integer) & linefeed
+end repeat
+return out`]);
+
+  const cocoa = raw.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [x, y, width, height, scale] = line.split(",").map(Number);
+    return { x, y, width, height, scale };
+  });
+  if (cocoa.length === 0) throw new Error("Couldn't read the display layout.");
+
+  // `screens()` puts the primary display — the one at the Cocoa origin — first, and
+  // its height is what flips the rest.
+  const primaryHeight = cocoa[0].height;
+  return cocoa.map((screen, index) => ({
+    index: index + 1,
+    origin: { x: screen.x, y: primaryHeight - (screen.y + screen.height) },
+    width: screen.width,
+    height: screen.height,
+    scale: screen.scale,
+    isMain: index === 0,
+  }));
+}
+
+async function displayAt(index) {
+  const all = await displays();
+  const wanted = index === undefined ? 1 : Math.round(Number(index));
+  const found = all.find((screen) => screen.index === wanted);
+  if (!found) {
+    throw new Error(
+      `There is no display ${wanted}. Displays are numbered 1 to ${all.length}, 1 being the main one.`);
+  }
+  return { display: found, count: all.length };
+}
+
+/// A PNG's pixel dimensions, straight out of the IHDR header.
+///
+/// Read rather than assumed so a capture that came back as the wrong display is an
+/// error instead of a plausible image — which is the failure this whole section is
+/// written to prevent.
+function pngSize(buffer) {
+  if (buffer.length < 24 || buffer.readUInt32BE(12) !== 0x49484452) return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
 // MARK: - Validated vocabularies
 //
 // These are the only values that ever reach a script as *syntax*. Each lookup fails
@@ -115,20 +191,67 @@ const tools = [
   {
     name: "capture_screen",
     description:
-      "Take a screenshot of the whole screen and return it as an image. Use this to see " +
-      "what is currently on screen before deciding where to click.",
-    inputSchema: { type: "object", properties: {} },
-    async handler() {
+      "Take a screenshot of one display and return it as an image. Defaults to the main " +
+      "display. Use this to see what is on screen before deciding where to click — the " +
+      "reply says which display it is and how many there are.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        display: {
+          type: "number",
+          description: "Which display to capture, 1 being the main one. Defaults to 1.",
+        },
+      },
+    },
+    async handler({ display }) {
+      const { display: screen, count } = await displayAt(display);
       // Written to the private temp directory and deleted before returning, so the
       // path never leaves this process. The spec's rule is that screenshots reach
       // the model as image content and never as a readable path — a path would be a
       // second capability handed over without passing the tool gate.
       const path = join(tmpdir(), `gs-agent-shot-${process.pid}-${Date.now()}.png`);
       try {
+        // -D names the display explicitly. Without it `screencapture` picks, and on a
+        // multi-display Mac the model gets an image of somewhere it did not ask about
+        // with nothing in the reply to say so.
         // -x: no shutter sound. A capture the user can hear is one they can notice,
         // but this fires often enough that it would become noise rather than signal.
-        await run("screencapture", ["-x", "-t", "png", path], 20000);
-        return image(await readFile(path), "image/png");
+        await run("screencapture", ["-x", "-t", "png", "-D", String(screen.index), path], 20000);
+        let buffer = await readFile(path);
+
+        // Checked, not trusted. If the image is not the size this display should have
+        // produced, then it is a picture of something else, and every coordinate read
+        // off it would be a confident click in the wrong place — the exact failure
+        // that is invisible without this test.
+        const size = pngSize(buffer);
+        const expected = { width: screen.width * screen.scale, height: screen.height * screen.scale };
+        if (size && (size.width !== expected.width || size.height !== expected.height)) {
+          throw new Error(
+            `Screenshot of display ${screen.index} came back ${size.width}x${size.height}, ` +
+            `but that display should produce ${expected.width}x${expected.height}. ` +
+            `Refusing it rather than returning a picture of the wrong screen.`);
+        }
+
+        // Downscaled so one pixel is one point. The alternative — returning a Retina
+        // image and a scale factor for the model to divide by — is arithmetic on the
+        // path to a click, and arithmetic that goes wrong lands the pointer on another
+        // monitor rather than failing.
+        if (screen.scale !== 1) {
+          await run("sips", ["-z", String(screen.height), String(screen.width), path, "--out", path], 20000);
+          buffer = await readFile(path);
+        }
+
+        const result = image(buffer, "image/png");
+        result.content.push({
+          type: "text",
+          text:
+            `Display ${screen.index} of ${count}${screen.isMain ? " (main)" : ""}, ` +
+            `${screen.width}x${screen.height} points, shown at 1 pixel per point. ` +
+            `Read positions straight off this image and pass them to click_coordinate ` +
+            `with display: ${screen.index} — they are relative to this image's top-left, ` +
+            `not to the whole desktop.`,
+        });
+        return result;
       } finally {
         await unlink(path).catch(() => {});
       }
@@ -272,23 +395,46 @@ end run`, [application, label]);
   {
     name: "click_coordinate",
     description:
-      "Click at a screen position, in points from the top-left of the main display. Use only " +
-      "when the target has no accessible name — take a screenshot first to find the position.",
+      "Click a position on a display, measured in points from the top-left of that " +
+      "display's own screenshot — not the whole desktop. Pass the same `display` you " +
+      "captured. Use only when the target has no accessible name; prefer click_element.",
     inputSchema: {
       type: "object",
       properties: {
-        x: { type: "number", description: "X position in points." },
-        y: { type: "number", description: "Y position in points." },
+        x: { type: "number", description: "X position in points, from the left edge of this display." },
+        y: { type: "number", description: "Y position in points, from the top edge of this display." },
+        display: {
+          type: "number",
+          description: "Which display the position is on, 1 being the main one. Defaults to 1.",
+        },
       },
       required: ["x", "y"],
     },
-    async handler({ x, y }) {
+    async handler({ x, y, display }) {
       const px = requireNumber(x, "x");
       const py = requireNumber(y, "y");
+      const { display: screen } = await displayAt(display);
+
+      // Refused rather than clamped. A position off the edge of the display means the
+      // model is working from a different picture than it thinks, and clamping would
+      // turn that into a click somewhere plausible — which is how a misplaced click
+      // becomes invisible instead of reported.
+      if (px < 0 || py < 0 || px >= screen.width || py >= screen.height) {
+        throw new Error(
+          `(${px}, ${py}) is outside display ${screen.index}, which is ` +
+          `${screen.width}x${screen.height} points. Coordinates are measured from that ` +
+          `display's top-left corner, not the whole desktop. Capture the display you ` +
+          `mean and read the position off that image.`);
+      }
+
+      // Into the global plane only here, at the last moment, where the origin that
+      // makes it meaningful is right next to it.
+      const globalX = screen.origin.x + px;
+      const globalY = screen.origin.y + py;
       await osa(`on run argv
   tell application "System Events" to click at {(item 1 of argv) as number, (item 2 of argv) as number}
-end run`, [px, py]);
-      return text(`Clicked at (${px}, ${py})`);
+end run`, [globalX, globalY]);
+      return text(`Clicked (${px}, ${py}) on display ${screen.index}`);
     },
   },
 

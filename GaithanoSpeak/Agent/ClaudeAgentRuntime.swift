@@ -542,6 +542,16 @@ private final class TurnProcess: @unchecked Sendable {
             drained.signal()
         }
 
+        // `cancel()` can land before this thread gets here — the process is created on
+        // the main actor and started on a detached task, so an Esc in that gap used to
+        // find nothing running, decline to kill it, and then let it launch anyway. That
+        // leaves a Claude Code session acting on the user's screen after the run it
+        // belonged to is gone, with nothing left holding a reference to stop it.
+        lock.lock()
+        let cancelledBeforeLaunch = cancelled
+        lock.unlock()
+        if cancelledBeforeLaunch { return .cancelled }
+
         do {
             try process.run()
         } catch {
@@ -608,11 +618,21 @@ private final class TurnProcess: @unchecked Sendable {
     }
 
     private func kill() {
+        // `terminate()` raises an Objective-C exception on a process that was never
+        // launched, and an ObjC exception crossing Swift is not catchable — it takes
+        // the app down with no Swift frame to explain it. `isRunning` is the guard, and
+        // the pid is read only inside it, because `processIdentifier` is 0 before a
+        // launch and `kill(0, SIGKILL)` signals the whole process group. That is this
+        // app killing itself, which would present as the crash it is meant to prevent.
         guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
         process.terminate()
         // SIGTERM is usually enough; Node occasionally isn't listening.
-        let pid = process.processIdentifier
         DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [self] in
+            // Re-checked rather than remembered: by now the child may have exited and
+            // been reaped, and a pid the system has since handed to something else is
+            // one SIGKILL away from being someone else's problem.
             if self.process.isRunning { Darwin.kill(pid, SIGKILL) }
         }
     }
