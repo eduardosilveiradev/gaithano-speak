@@ -54,15 +54,21 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 ### Non-obvious invariants
 
-**Option-as-modifier.** The hotkey is the Option key, which users also press for ⌥←, ⌥e, ⌥Tab, Raycast. The mechanism resolving this: `optionDown` starts capture *provisionally* and silently, and only after `minHold` does dictation "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`).
+**Two chords, and the side of the keyboard is the mode.** Right Control+Option dictates; left Control+Option runs the agent. Nothing else arms either one — no third key, no modifier arriving mid-utterance, so a user never has to watch the overlay to know where their words are going.
 
-**`minHold` currently defaults to 0**, which switches that protection off: the user asked for instant start, judging the half-second wait worse than the collisions. ⌥-combos now start a dictation. The machinery is intact and timing-driven, so raising `minHold` restores it — keep the provisional/commit split and the abandon path working, and don't collapse them into "commit immediately" just because the default makes the window empty. `HotkeyMonitor` never consumes the modifier; it consumes Esc only while a dictation is active. Don't add feedback before commit, and don't consume Option.
+**`.maskControl` and `.maskAlternate` cannot tell the sides apart, and that is the entire distinction.** Both are set by either side. `HotkeyMonitor` reads the device-dependent flag bits instead (`NX_DEVICELCTLKEYMASK` 0x1, `NX_DEVICERCTLKEYMASK` 0x2000, `NX_DEVICELALTKEYMASK` 0x20, `NX_DEVICERALTKEYMASK` 0x40, from `IOKit/hidsystem/IOLLEvent.h`) — the only place side survives in a `CGEvent`. State is recomputed in full on every `flagsChanged` rather than tracked as per-key transitions, so a missed event heals on the next one instead of leaving a chord stuck down. An earlier version read `.maskAlternate` for the right Option and got the wrong answer whenever the left one was also held.
+
+`ChordResolver` (SpeakCore, pure, tested) matches on *superset*, so a stray Shift joining a held chord doesn't end it, and lets the already-active chord win when all four keys are down — releasing a key must never change where an utterance already being spoken goes.
+
+**Option-as-modifier.** A chord starts capture *provisionally* and silently; only after `minHold` does it "commit" — sound, overlay, media pause. Any other keypress inside that window silently abandons everything (`stopCaptureDiscard` + `passThroughModifier`).
+
+**`minHold` currently defaults to 0**, which switches that protection off: the user asked for instant start, judging the half-second wait worse than the collisions. ⌃⌥-combos now start a dictation, and on the left side they start an *agent run* — a wider blast radius than a stray dictation, though VAD and `UtteranceGate` still bail out when nobody spoke. The machinery is intact and timing-driven, so raising `minHold` restores it — keep the provisional/commit split and the abandon path working, and don't collapse them into "commit immediately" just because the default makes the window empty. `HotkeyMonitor` never consumes a modifier; it consumes Esc while a dictation is active or an approval is pending, and bare `Y`/`N`/`A` only while an approval is pending.
 
 **Secure input.** When a password field has focus the machine goes to `.blockedSecureInput` and the hotkey is disarmed. If secure input turns on mid-dictation, insertion reroutes to the clipboard rather than synthesized keystrokes.
 
 **Foundation Model latency.** ~5–9s cold, ~0.5–3s warm. `formatter.prewarm()` fires when *recording starts* so the model is hot by the time a transcript exists. The 10s timeout is deliberately generous — a short timeout silently degrades every dictation to grammar-blind deterministic cleanup. Plain-string generation is used, not guided `@Generable` (guided measured ~7s even warm). A fresh `LanguageModelSession` is created per format call so prior dictations can't bleed into context; `keepWarm` exists only to hold weights resident.
 
-**`.claude` is the one formatter that leaves the machine.** `ClaudeCLIFormatter` shells out to `claude -p` and sends every dictated utterance, in every app, to Anthropic — plus the CLI writes a session transcript per call under `~/.claude`, so it lands on disk too. It's offered because the on-device model is grammar-blind on long input and Apple Intelligence silently refuses some content — but it is not the default, and the Settings warning is deliberately blunt and non-collapsible. Keep that copy honest; a user picking it from a dropdown has no other cue that local-first just stopped applying. (It replaced a Vertex formatter, which is why `FormatterID.vertexGemini` still exists: `SettingsStore.load()` migrates that saved value to `.claude`, and removing the case would fail the decode and silently reset the user's choice. Talk and the agent are still on Vertex; only the dictation correction pass moved.)
+**`.claude` is the one formatter that leaves the machine.** `ClaudeCLIFormatter` shells out to `claude -p` and sends every dictated utterance, in every app, to Anthropic — plus the CLI writes a session transcript per call under `~/.claude`, so it lands on disk too. It's offered because the on-device model is grammar-blind on long input and Apple Intelligence silently refuses some content — but it is not the default, and the Settings warning is deliberately blunt and non-collapsible. Keep that copy honest; a user picking it from a dropdown has no other cue that local-first just stopped applying. (It replaced a Vertex formatter, which is why `FormatterID.vertexGemini` still exists: `SettingsStore.load()` migrates that saved value to `.claude`, and removing the case would fail the decode and silently reset the user's choice. Talk still offers Vertex; the agent moved to Claude Code entirely.)
 
 **`MAX_THINKING_TOKENS=0` is the difference between 1.5s and 16s, and it is set in `childEnvironment()`.** Left on, Haiku spends ~530 output tokens reasoning about where a comma goes before emitting a 17-token sentence. Off, the same call is ~1.5–3s, 17 tokens, and half the cost. `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1` goes with it. Two knobs that look like they'd do this and don't: `--effort low` (726 output tokens vs 580 at medium — noise), and a small budget like `MAX_THINKING_TOKENS=100`, which the API clamps up to its 1024 minimum and returns 438 tokens in 5.9s. It is binary: off, or ~6s.
 
@@ -96,9 +102,11 @@ Capture the pair inside `format(_:)`, at the moment the model returns, and nowhe
 
 **Settings decoding is lenient.** `AppSettings.init(from:)` decodes every key with a default fallback so adding a setting never wipes saved preferences. Add new fields to both the memberwise init and the custom decoder.
 
-### Claude Code handoff (⌃⌥, and it wins)
+### Claude Code handoff (no gesture at present)
 
-A fourth `UtteranceMode`, `.handoff`: same capture, but the transcript is typed into the terminal running a Claude Code session instead of being answered. `settings.claudeCodeHandoffEnabled` (on by default) makes it outrank both Talk and the agent — the coordinator emits `.handoffModifierEngaged` in place of `.talkModifierEngaged`, and suppresses the agent event entirely. It's the only ⌃⌥ path that keeps working when Vertex is down.
+A fourth `UtteranceMode`, `.handoff`: same capture, but the transcript is typed into the terminal running a Claude Code session instead of being answered.
+
+**Talk and the handoff currently have no key.** Moving dictation to right ⌃⌥ and the agent to left ⌃⌥ used up the gesture both of them shared. Their reducer paths, providers, and tests are all intact and still exercised — `.talkModifierEngaged` and `.handoffModifierEngaged` are simply never emitted. Deciding what gesture they get back (or whether the agent subsumes Talk) is open work; don't delete the paths on the assumption they're dead code.
 
 **The session is found by process ancestry, not a list of terminals.** `ClaudeCodeHandoff.hostApplication()` walks up from every running Claude Code process until it reaches a pid `NSRunningApplication` recognises — that's the host, whether it's Warp, iTerm, Ghostty, or VS Code. A session under a daemon or an ssh login has no such ancestor and correctly drops out. Our own `ClaudeCLIFormatter` subprocess is excluded by pid, so the formatter can't be mistaken for a session.
 
@@ -107,6 +115,30 @@ A fourth `UtteranceMode`, `.handoff`: same capture, but the transcript is typed 
 **Failure is a notice, never a fallback.** No session found → `.handoffFailed(reason)` → the reason on screen and the text on the clipboard. Rerouting to a model because the terminal wasn't there would hand words meant for a terminal to something the user didn't pick — the reducer refuses the `.handoff` → `.agent`/`.talk` demotion for the same reason, even though the coordinator currently makes it unreachable.
 
 **The handoff skips the model formatter.** Deterministic cleanup plus the personal dictionary only. The destination reads intent rather than prose, and `ClaudeCLIFormatter` now costs 6–10s — a wait on the way to a wait. The dictionary pass is the part that earns its place: it's what turns "gee are dee bee" into `GRDB` before an agent goes looking for the wrong file.
+
+### Agent Mode (left ⌃⌥)
+
+`AGENT_MODE_SPEC.md` is the product spec; this is what the code guarantees. A fifth `UtteranceMode`, `.agent`: transcribe, then hand the task to an embedded Claude Code session that reasons and acts through bounded MCP tools while a panel narrates it.
+
+**One frozen vocabulary, one direction.** `SpeakCore/Agent/AgentTypes.swift` is the contract four separate halves speak — the runtime, the approval proxy, the panel, the screenshot service. The runtime emits `AgentEvent`, `AgentTranscript.apply(_:)` folds them, the panel renders the transcript. Nothing renders an event directly, so there is exactly one definition of what the user is looking at. Three invariants live in that reducer and are pinned by tests rather than left to callers: escalation only ever climbs, "allow all" is cleared by *every* way a run can end, and a step that was running when the run died becomes `.interrupted` rather than `.failed` because its outcome is genuinely unknown.
+
+**The approval boundary is a proxy, not a prompt.** `MCPApprovalProxy` is the only MCP server Claude Code can see; it forwards to the real ones. `tools/list` is filtered on the way out and `tools/call` again on the way in, so a model that guesses a tool name it was never shown is still refused. `AgentApprovalGate.decide` *suspends the tool call* — the downstream server has not been sent anything yet, which is what makes "deny" mean the action never happened rather than that it was undone. There is deliberately no timeout: a prompt that expires into a default answer is a prompt that eventually answers itself.
+
+**The allowlist is positive; the denylist is only belt-and-braces.** A denylist cannot know about a tool Claude Code adds next month. `AgentToolAllowlist` admits only names shaped `mcp__<known server>__<tool>` that are explicitly listed, and a forbidden-fragment check (`eval`, `run_code`, `applescript`, `shell`, …) runs *after* set membership so it survives a future edit that adds one to a server's set. `ActionRiskPolicy.classify` re-checks the allowlist before judging anything and returns `.unknown` — which means ask — for everything it does not positively recognise.
+
+**SmartThings is judged by capability, never by label**, and that is deliberately the opposite of how a click is judged. A click has no authoritative field, so scanning its text can only ever *add* a confirmation; here there is one, and reading the label would let a name *remove* one. "Front Door Light" with `switch` stays automatic; `lock` on a device the user named "Lamp" is still `.security`. `run_scene` is `.unknown` because a scene is a stored list of commands the app cannot see, and one of them may be a lock.
+
+**`@main` is on `GaithanoSpeakMain`, not `GaithanoSpeakApp`.** Claude Code spawns its stdio MCP servers itself, so whatever `--mcp-config` names has to be an executable — but the gate needs the *running* app. The executable is this same binary in relay mode, copying stdin to a Unix socket and back, and `MCPApprovalProxy.runRelayIfRequested()` must run before AppKit does anything. Remove that call and Claude Code spawns a second copy of the GUI app instead of a server; Agent Mode then has no tools at all, silently.
+
+**Every agent ending is bridged back into the dictation reducer.** The reducer parks in `.processing(.answering)` when `.runAgent` is emitted and has no other way out. `.responseFinished` → `.answerReady`, `.failed` → `.answerFailed`, `.cancelled` → `.escPressed`. Miss one and the dictation hotkey stays dead for the rest of the session, with no error.
+
+**`hotkeyMonitor.setApprovalPending` is derived from the transcript**, never set wherever a prompt is raised. It is the entire licence to consume three bare letters system-wide; left true after a run dies under a pending approval, the user loses `Y`, `N` and `A` in every text field on the machine.
+
+**Escalation is a tool call on our own server, checked on server *and* tool name** (`mcp__control__escalate_model`), so an MCP package the user installs later cannot ship its own `escalate_model` and pick the model. Pattern-matching prose was the cheap alternative and is wrong twice: models say "this is hard" while handling things fine, and a model that genuinely needs help has no reliable way to say so. Claude Code cannot switch model mid-turn, so escalation is: let the turn end, then `--resume <session> --model <higher>` with a continuation prompt. `.escalated` fires when the *tool call* is seen, so the panel is honest about intent, not about which process is alive. With no session id the request **fails** rather than restarting fresh — a context-free retry is how a message gets sent twice.
+
+**Screenshots reach Claude as MCP image content and never as a path.** `AgentCapture` splits the JPEG data from the panel's thumbnail reference so no single value offers both a file path and a way to send it. The Talk provider's stage-a-file-and-allow-`Read` trick is exactly what must not happen here. `capture()` throws rather than returning nil, because the spec's "stop computer-use actions that require visual verification" is a decision only the caller can make and only if it is told.
+
+**Two spec requirements do not hold as written.** Model availability per plan is not checkable without one real request per tier, so an unavailable Opus surfaces as a mid-run failure rather than at preflight. "Chrome extension connected" is not observable from this app at all — the extension talks to the MCP server, not to us — so it is injected, defaulting to false. Both are honest gaps, not oversights.
 
 ### Speech (reading answers aloud)
 
@@ -141,4 +173,10 @@ GRDB SQLite at `~/Library/Application Support/GaithanoSpeak/gaithano.sqlite`. `A
 
 ## Status
 
-V1 "core loop + polish". Not built yet: per-app tone profiles, snippets, command mode, cloud STT.
+V1 "core loop + polish", plus Agent Mode built but never run end to end.
+
+Agent Mode compiles, is unit-tested where it can be, and fails cleanly — but `mcp-macos-cua`, `@playwright/mcp` and the SmartThings adapter are not installed, so a left ⌃⌥ press today reaches the runtime, finds no servers, and reports "Agent Mode has no tools". That is the designed failure. Nothing has been verified against a live Claude Code session, and `Scripts/verify-checklist.md` has no Agent Mode entries yet.
+
+Open: a gesture for Talk and the Claude Code handoff; an `agentModelCeiling` for plans without Opus; multi-display capture.
+
+Not built: per-app tone profiles, snippets, command mode, cloud STT.
