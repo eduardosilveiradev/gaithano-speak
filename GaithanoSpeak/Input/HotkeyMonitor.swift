@@ -17,9 +17,37 @@ enum HotkeyEvent: Sendable {
     case insertAnswer
 }
 
+/// The keyboard half of the Agent Mode approval gate.
+///
+/// Deliberately its own enum rather than three more `HotkeyEvent` cases. Adding a
+/// case to `HotkeyEvent` breaks the exhaustive switch in `RecordingCoordinator`,
+/// which is owned elsewhere while Agent Mode is being built in parallel — and a
+/// separate channel is the version of this that merges cleanly. Fold it into
+/// `HotkeyEvent` once the coordinator handles it; the case names are already the
+/// ones it will want.
+enum HotkeyApprovalEvent: Sendable {
+    /// `Y` — run the held call once.
+    case approvalAllow
+    /// `N` — refuse this one call and let the model reconsider.
+    case approvalDeny
+    /// `A` — approve every remaining action for the rest of this request.
+    case approvalAllowAll
+
+    /// The decision to hand the gate. Named the same as the panel's buttons emit, so
+    /// the keyboard and the mouse cannot drift apart.
+    var decision: ApprovalDecision {
+        switch self {
+        case .approvalAllow: return .allow
+        case .approvalDeny: return .deny
+        case .approvalAllowAll: return .allowAll
+        }
+    }
+}
+
 /// Watches for the two push-to-talk chords system-wide using an active `CGEventTap`
 /// on a dedicated run-loop thread. Never consumes a modifier (so ⌃⌥-combos keep
-/// working); consumes Esc only while a dictation is active.
+/// working); consumes Esc only while a dictation is active, and the bare letters
+/// `Y` / `N` / `A` only while an Agent Mode approval is actually pending.
 final class HotkeyMonitor: @unchecked Sendable {
     private var tapPort: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -35,13 +63,28 @@ final class HotkeyMonitor: @unchecked Sendable {
     private var activeChord: HotkeyChord?
     private var active = false   // recording or processing — controls Esc consumption
     private var panelPresented = false  // an answer is on screen — enables ⌘C / ⌘⏎ / Esc
+    private var approvalPending = false // the agent is stopped at the gate — enables Y / N / A
 
     /// Called on the main actor for each hotkey event.
     var onEvent: (@Sendable (HotkeyEvent) -> Void)?
 
+    /// Called on the main actor when the user answers an approval from the keyboard.
+    /// Only ever fires while `setApprovalPending(true)` is in force.
+    var onApprovalEvent: (@Sendable (HotkeyApprovalEvent) -> Void)?
+
     private static let kEsc: Int64 = 53
     private static let kC: Int64 = 8
     private static let kReturn: Int64 = 36
+    private static let kA: Int64 = 0
+    private static let kY: Int64 = 16
+    private static let kN: Int64 = 45
+
+    /// Every modifier that makes a keypress something other than a bare letter.
+    /// `.maskNonCoalesced` and friends are always set on a real event, so testing
+    /// `flags.isEmpty` would never be true and the approval keys would never fire.
+    private static let modifierMask: CGEventFlags = [
+        .maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn
+    ]
 
     /// Whether a dictation is active (set by the coordinator) — gates Esc consumption.
     func setActive(_ active: Bool) {
@@ -52,6 +95,17 @@ final class HotkeyMonitor: @unchecked Sendable {
     /// act on the answer rather than on whatever app is frontmost.
     func setAnswerPanelPresented(_ presented: Bool) {
         lock.lock(); self.panelPresented = presented; lock.unlock()
+    }
+
+    /// Whether Agent Mode is holding a tool call at the approval gate.
+    ///
+    /// This flag is the entire licence to consume `Y`, `N` and `A`. They are ordinary
+    /// letters, so a wider window would swallow a keystroke out of every text field on
+    /// the machine — the same reason ⌘C is only taken while an answer panel is up. It
+    /// must be cleared the moment the gate resolves, including when the run is
+    /// cancelled or fails out from under it.
+    func setApprovalPending(_ pending: Bool) {
+        lock.lock(); self.approvalPending = pending; lock.unlock()
     }
 
     func start() {
@@ -125,6 +179,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         let wasHeld = self.activeChord != nil
         let isActive = self.active
         let hasPanel = self.panelPresented
+        let hasApproval = self.approvalPending
         lock.unlock()
 
         if type == .flagsChanged {
@@ -148,7 +203,7 @@ final class HotkeyMonitor: @unchecked Sendable {
 
         if type == .keyDown {
             if keyCode == Self.kEsc {
-                if isActive || hasPanel {
+                if isActive || hasPanel || hasApproval {
                     emit(.escPressed)
                     return true // consume Esc while active or showing an answer
                 }
@@ -167,6 +222,26 @@ final class HotkeyMonitor: @unchecked Sendable {
                 // start a new recording before Return ever arrived.
                 if keyCode == Self.kReturn && flags.contains(.maskCommand) {
                     emit(.insertAnswer)
+                    return true
+                }
+            }
+            // Agent Mode approval keys, bare only. A modified press (⌘A, ⌃N) belongs
+            // to whatever app is frontmost and passes straight through; only the
+            // unmodified letter is ours, and only inside the gate's window.
+            if hasApproval && event.flags.intersection(Self.modifierMask).isEmpty {
+                let decision: HotkeyApprovalEvent? = switch keyCode {
+                case Self.kY: .approvalAllow
+                case Self.kN: .approvalDeny
+                case Self.kA: .approvalAllowAll
+                default: nil
+                }
+                if let decision {
+                    // Autorepeat is consumed but not emitted: holding `A` down would
+                    // otherwise resolve this approval and then race the next one the
+                    // runtime raises, answering a question the user never read.
+                    if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                        emitApproval(decision)
+                    }
                     return true
                 }
             }
@@ -199,6 +274,11 @@ final class HotkeyMonitor: @unchecked Sendable {
 
     private func emit(_ event: HotkeyEvent) {
         let handler = onEvent
+        DispatchQueue.main.async { handler?(event) }
+    }
+
+    private func emitApproval(_ event: HotkeyApprovalEvent) {
+        let handler = onApprovalEvent
         DispatchQueue.main.async { handler?(event) }
     }
 }
