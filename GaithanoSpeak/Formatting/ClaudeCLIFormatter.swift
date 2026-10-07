@@ -47,7 +47,7 @@ import SpeakCore
 struct ClaudeCLIFormatter {
     struct Config: Sendable {
         /// Model alias or id passed to `--model`. See `AppSettings.formatterClaudeModel`
-        /// for why the default is Sonnet rather than Haiku.
+        /// for why the default is Haiku.
         var model: String
         /// Explicit path to the `claude` binary. Blank falls back to `discoveredPath`.
         /// A GUI app inherits a bare PATH from launchd, so the usual install locations

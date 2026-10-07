@@ -52,14 +52,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Model passed to `claude --model` for the `.claude` formatter. Separate from
     /// `talkModel` so the two can be tuned independently.
     ///
-    /// Sonnet, not Haiku, and the reason is instruction-following rather than prose
-    /// quality. With thinking disabled — which is what makes this formatter usable at
-    /// all — Haiku broke two of the prompt's subtler rules in one sitting: it refused a
-    /// transcript that read as a command instead of punctuating it, and it trimmed the
-    /// opening words off dictations that continue existing text. Sonnet handles both,
-    /// plus the stutter-across-a-pause dedup Haiku still misses, for about 0.8s more.
-    /// Running on a subscription, the extra tokens are plan usage rather than money.
-    /// Set it to `haiku` if latency ever matters more than the edges.
+    /// Haiku. Benched on 7 Oct 2026 against Sonnet 5.5 with this formatter's own flags
+    /// and prompt: Haiku 5.5 no longer refuses command-like transcripts or trims the
+    /// opening words of a continuation (the reasons the default used to be Sonnet), and
+    /// answers in ~0.9s of model time against ~1.4s. It still softens some swearing and
+    /// can drop a hedge inside a stutter, which Sonnet doesn't. Set it to `sonnet` if
+    /// those edges matter more than the wait.
     public var formatterClaudeModel: String
     /// Explicit path to the `claude` binary. Blank auto-detects the usual install
     /// locations, which is the whole point: a GUI app launched by launchd inherits a
@@ -190,7 +188,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
                 hasCompletedOnboarding: Bool = false,
                 localServerURL: String = "http://localhost:1234/v1",
                 localServerModel: String = "gemma-4-e2b-it-mlx",
-                formatterClaudeModel: String = "sonnet",
+                formatterClaudeModel: String = "haiku",
                 formatterClaudePath: String = "",
                 agentMacOSMCPPath: String = "",
                 agentSmartThingsMCPPath: String = "",

@@ -224,7 +224,7 @@ struct SettingsView: View {
         Label("Everything you dictate — in every app, not just this one — is sent to Anthropic to be punctuated. That includes anything you'd never paste into a chatbot, and the CLI keeps a copy of each one on disk under ~/.claude. The other formatters never leave your Mac.",
               systemImage: "exclamationmark.triangle")
             .font(.caption).foregroundStyle(.orange)
-        Label("Expect two to five seconds before your text appears, and every dictation counts against your Claude plan's usage. Set the model to “haiku” to roughly halve the wait, at the price of occasionally mangling long dictations that continue existing text.",
+        Label("Expect two to five seconds before your text appears, and every dictation counts against your Claude plan's usage. The default “haiku” is the fastest; set “sonnet” if it ever softens your swearing or drops a word you meant.",
               systemImage: "clock")
             .font(.caption).foregroundStyle(.orange)
         if let path = ClaudeCLIFormatter.discoveredPath, environment.settings.formatterClaudePath.isEmpty {
