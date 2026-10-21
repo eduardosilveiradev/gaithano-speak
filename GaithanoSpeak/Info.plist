@@ -30,6 +30,8 @@
 	<string>Gaithano Speak listens to your microphone while you hold the dictation key, so it can turn your speech into text.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Gaithano Speak briefly checks whether audio is actually playing so it only pauses real playback while you dictate — it measures the output level and never records or stores any audio.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Agent Mode controls apps on your behalf — clicking, typing, and reading what is on screen — only for the actions you approve when you hold the agent key.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Gaithano Speak uses on-device speech recognition to transcribe your dictation.</string>
 	<key>NSHumanReadableCopyright</key>

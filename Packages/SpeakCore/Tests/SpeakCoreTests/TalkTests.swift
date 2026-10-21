@@ -235,6 +235,45 @@ struct StreamChunkParserTests {
         #expect(StreamChunkParser.geminiDelta(fromSSELine: mixed) == "42")
     }
 
+    /// Lines copied from a live `claude -p --output-format stream-json
+    /// --include-partial-messages` run, trimmed to the fields read here.
+    @Test("Reads claude CLI text deltas and ignores everything else on the stream")
+    func claudeCodeDelta() {
+        let text = #"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Paris."}}}"#
+        #expect(StreamChunkParser.claudeCodeDelta(fromJSONLine: text) == "Paris.")
+
+        // A tool call being assembled — the Read of the screenshot — shares the shape.
+        let toolInput = #"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file"}}}"#
+        #expect(StreamChunkParser.claudeCodeDelta(fromJSONLine: toolInput) == nil)
+
+        let thinking = #"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#
+        #expect(StreamChunkParser.claudeCodeDelta(fromJSONLine: thinking) == nil)
+
+        // The whole assistant message is repeated once the turn ends; taking it as a
+        // delta too would double the answer.
+        let assistant = #"{"type":"assistant","message":{"content":[{"type":"text","text":"Paris."}]}}"#
+        #expect(StreamChunkParser.claudeCodeDelta(fromJSONLine: assistant) == nil)
+
+        #expect(StreamChunkParser.claudeCodeDelta(fromJSONLine: "not json") == nil)
+    }
+
+    /// The CLI exits 0 on a failed turn and says so in the body, so the result line —
+    /// not the exit status — is what decides whether there's an answer.
+    @Test("Reads the claude CLI result line, success and failure")
+    func claudeCodeResult() {
+        let ok = #"{"type":"result","subtype":"success","is_error":false,"result":"Paris.\n"}"#
+        #expect(StreamChunkParser.claudeCodeResult(fromJSONLine: ok) == .answer("Paris."))
+
+        let failed = #"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"5-hour limit reached"}"#
+        #expect(StreamChunkParser.claudeCodeResult(fromJSONLine: failed) == .failed("5-hour limit reached"))
+
+        let empty = #"{"type":"result","subtype":"error_max_turns","is_error":false,"result":""}"#
+        #expect(StreamChunkParser.claudeCodeResult(fromJSONLine: empty) == .failed("error_max_turns"))
+
+        let notResult = #"{"type":"system","subtype":"init"}"#
+        #expect(StreamChunkParser.claudeCodeResult(fromJSONLine: notResult) == nil)
+    }
+
     @Test("Extracts error messages from both Vertex body shapes")
     func errorMessages() {
         let dict = #"{"error":{"code":403,"message":"Permission denied"}}"#.data(using: .utf8)!
@@ -275,6 +314,42 @@ struct TalkPromptBuilderTests {
         let huge = String(repeating: "x", count: 10_000)
         let turn = TalkPromptBuilder.userTurn(question: "q", context: TalkContext(selectedText: huge))
         #expect(turn.count < TalkPromptBuilder.maxSelectedTextChars + 500)
+    }
+
+    /// The CLI can't be handed an image, so the note that buys it the Read tool must
+    /// appear when — and only when — a screenshot has actually been staged for it.
+    @Test("The file vision note tracks the screenshot path, not the vision setting")
+    func fileVisionNote() {
+        #expect(!TalkPromptBuilder.systemPrompt(forScreenshotAt: nil).contains(TalkPromptBuilder.fileVisionNote))
+        #expect(!TalkPromptBuilder.systemPrompt(forScreenshotAt: "").contains(TalkPromptBuilder.fileVisionNote))
+        #expect(TalkPromptBuilder.systemPrompt(forScreenshotAt: "/tmp/shot.jpg").contains(TalkPromptBuilder.fileVisionNote))
+    }
+
+    @Test("Flattening replays prior turns and ends with the newest question")
+    func flattensThread() {
+        let thread = [TalkTurn(role: .user, text: "Question: first"),
+                      TalkTurn(role: .assistant, text: "an answer"),
+                      TalkTurn(role: .user, text: "Question: follow up")]
+        let prompt = TalkPromptBuilder.flattenedPrompt(thread: thread)
+
+        #expect(prompt.contains("User: Question: first"))
+        #expect(prompt.contains("You: an answer"))
+        #expect(prompt.hasSuffix("Question: follow up"))
+        // A bare prompt must not mention a screenshot that isn't there.
+        #expect(!prompt.contains("Screenshot"))
+    }
+
+    @Test("A single-turn prompt is just the question, plus the screenshot path")
+    func flattensSingleTurn() {
+        let thread = [TalkTurn(role: .user, text: "Question: what is this")]
+        #expect(TalkPromptBuilder.flattenedPrompt(thread: thread) == "Question: what is this")
+
+        let withShot = TalkPromptBuilder.flattenedPrompt(thread: thread,
+                                                         screenshotPath: "/tmp/shot.jpg")
+        #expect(withShot.contains("/tmp/shot.jpg"))
+        #expect(withShot.hasSuffix("Question: what is this"))
+        // It's passed as a CLI argument: a leading dash would read as a flag.
+        #expect(!withShot.hasPrefix("-"))
     }
 
     @Test("Only the newest turn carries context")
@@ -336,6 +411,26 @@ struct TalkSettingsTests {
         #expect(config.region == "global")
         #expect(config.model == "gemini-3.6-flash")
         #expect(config.thinkingBudget == 0)
+    }
+
+    /// Each provider reads its model from its own field. Handing Vertex's model id to
+    /// the claude CLI (or the reverse) fails at the far end, where the only symptom is
+    /// a notice and a silent fall-through to the local server.
+    @Test("Each provider resolves its own model, and the CLI path travels with it")
+    func modelPerProvider() {
+        var settings = AppSettings.default
+        settings.talkModel = "gemini-3.6-flash"
+        settings.talkClaudeModel = "sonnet"
+        settings.localServerModel = "gemma-4-e2b-it-mlx"
+        settings.formatterClaudePath = "/opt/homebrew/bin/claude"
+
+        settings.talkProvider = .vertexGemini
+        #expect(settings.talkConfig.model == "gemini-3.6-flash")
+        settings.talkProvider = .claudeCode
+        #expect(settings.talkConfig.model == "sonnet")
+        #expect(settings.talkConfig.executablePath == "/opt/homebrew/bin/claude")
+        settings.talkProvider = .localServer
+        #expect(settings.talkConfig.model == "gemma-4-e2b-it-mlx")
     }
 
     /// Bumping the default in `init` is invisible to anyone with saved settings — the

@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var serverTest: String?
     @State private var needsScreenRecording = false
+    @State private var speechTestRunning = false
 
     var body: some View {
         Form {
@@ -84,73 +85,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Talk") {
-                Toggle("Hold Control while speaking to ask a model", isOn: bind(\.talkEnabled))
-                Text("⌃⌥ instead of ⌥: your words go to a model and the answer appears in a panel instead of being typed. ⌘C copies it, ⌘↩ inserts it, esc closes.")
-                    .font(.caption).foregroundStyle(.secondary)
-
-                if environment.settings.talkEnabled {
-                    Toggle("Send it to Claude Code instead of answering", isOn: bind(\.claudeCodeHandoffEnabled))
-                    Text("⌃⌥ types what you said straight into the terminal running Claude Code and brings it to the front. Nothing goes to a model of ours, so there's no answer panel — and while this is on, the agent and the provider below are unreachable, which is why they're hidden.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-
-                if environment.settings.talkEnabled && environment.settings.claudeCodeHandoffEnabled {
-                    claudeCodeFields
-                } else if environment.settings.talkEnabled {
-                    Picker("Provider", selection: bind(\.talkProvider)) {
-                        ForEach(TalkProviderID.allCases, id: \.self) { provider in
-                            Text(provider.displayName).tag(provider)
-                        }
-                    }
-                    if environment.settings.talkProvider == .vertexGemini {
-                        vertexFields
-                    }
-                    Toggle("Send a screenshot of your screen", isOn: bind(\.talkVisionEnabled))
-                        .onChange(of: environment.settings.talkVisionEnabled) { _, enabled in
-                            // Ask up front rather than at the moment of the first
-                            // question — the prompt would otherwise interrupt speech.
-                            if enabled && !PermissionsService.requestScreenRecording() {
-                                needsScreenRecording = true
-                            }
-                        }
-                    Text(visionCaption)
-                        .font(.caption).foregroundStyle(.secondary)
-                    if needsScreenRecording && !PermissionsService.screenRecordingGranted {
-                        HStack {
-                            Text("Screen Recording isn't granted yet.")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("Open Settings") { PermissionsService.openScreenRecordingSettings() }
-                                .controlSize(.small)
-                        }
-                    }
-
-                    Divider()
-
-                    Toggle("Let the model use your computer", isOn: bind(\.agentEnabled))
-                        .onChange(of: environment.settings.agentEnabled) { _, enabled in
-                            // The agent can't work blind, so it needs the same grant
-                            // vision does — ask now rather than failing mid-run.
-                            if enabled && !PermissionsService.requestScreenRecording() {
-                                needsScreenRecording = true
-                            }
-                        }
-                    Text("On, ⌃⌥ runs the agent rather than answering: the model reads your screen and can click and type for you. Turn this off to go back to plain answers. It runs on its own for ordinary steps, and stops for your approval before anything that sends, deletes, buys, or touches a terminal or password manager — ↩ allows one step, A allows the rest of that run, esc stops it. Anything written on your screen is treated as text to read, never as instructions to follow.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Toggle("Always start in auto mode", isOn: bind(\.agentAutoConfirm))
-                    Text("Skips every approval prompt from the first step, so the model sends, deletes, and buys without stopping to ask. Typing while a password field has focus is still refused — that rail isn't a prompt. esc still stops a run.")
-                        .font(.caption)
-                        .foregroundStyle(environment.settings.agentAutoConfirm ? .orange : .secondary)
-
-                    if !environment.settings.talkVisionEnabled {
-                        // The agent cannot work blind, so it screenshots whatever the
-                        // setting above says. Saying so is better than a toggle that
-                        // quietly doesn't hold for one of the two gestures.
-                        Text("Note: this sends screenshots every step even with the setting above off — the model can't act on a screen it can't see. Turn this off to stop it.")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                }
-            }
+            speechSection
 
             Section("General") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
@@ -162,6 +97,99 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460, height: 420)
+    }
+
+    /// Reading answers aloud.
+    ///
+    /// Scoped to answers on purpose, and the caption says so: the obvious reading of
+    /// "speak responses" in a dictation app is that it will start reciting your
+    /// dictation, and someone who switched this on in an open-plan office to find that
+    /// out would not switch it on again.
+    @ViewBuilder private var speechSection: some View {
+        Section("Speech") {
+            Toggle("Read answers out loud", isOn: bind(\.speechEnabled))
+            Text("Talk answers are spoken when they arrive. Dictation is never spoken, and neither is anything sent to Claude Code — this only covers replies you'd otherwise read in the answer panel. esc stops it.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            if environment.settings.speechEnabled {
+                Picker("Voice engine", selection: bind(\.speechEngine)) {
+                    ForEach(SpeechEngineID.allCases, id: \.self) { engine in
+                        Text(engine.displayName).tag(engine)
+                    }
+                }
+
+                switch environment.settings.speechEngine {
+                case .system:
+                    Text("Uses the voice from System Settings › Accessibility › Spoken Content. Starts instantly and needs nothing installed.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                case .qwen3:
+                    Picker("Voice", selection: bind(\.speechVoice)) {
+                        ForEach(SpeechVoice.allCases, id: \.self) { voice in
+                            Text(voice.displayName).tag(voice)
+                        }
+                    }
+                    Text("Runs Qwen3-TTS locally through MLX — nothing leaves the machine. It needs a Python with `mlx-audio` installed and holds about 4 GB of weights in memory while enabled. The model loads when you start speaking, which takes around 13 seconds the first time; answers before then fall silent rather than waiting.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    if let found = QwenSpeechOutput.resolveInterpreter(
+                        explicit: environment.settings.speechPythonPath) {
+                        Label("Using \(found.path)", systemImage: "checkmark.seal")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Label("No Python with mlx-audio found. Name one below, or answers stay silent.",
+                              systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    TextField("Python path (blank = find it automatically)",
+                              text: bind(\.speechPythonPath))
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // Speech otherwise can only be tested by producing a real answer, which
+                // is a slow way to find out that a Python path is wrong — and makes a
+                // silent voice indistinguishable from a failed answer.
+                HStack {
+                    Button(speechTestRunning ? "Speaking…" : "Test voice") {
+                        speechTestRunning = true
+                        environment.speakSample()
+                        // Qwen's first utterance includes the ~13s model load.
+                        Task {
+                            try? await Task.sleep(for: .seconds(3))
+                            speechTestRunning = false
+                        }
+                    }
+                    .disabled(speechTestRunning)
+                    Text(environment.settings.speechEngine == .qwen3
+                         ? "The first one waits for the model to load (~13s)."
+                         : "Should be immediate.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                // Shown for both engines. Qwen has no speaking-rate control of its
+                // own, so this drives playback speed there instead — previously the
+                // slider was system-only and a slow Qwen voice had no remedy at all.
+                // 100–300 wpm: below 100 is unpleasant, above 300 is past what most
+                // people can follow on an unfamiliar sentence.
+                Slider(value: bind(\.speechRate), in: 100...300, step: 5) {
+                    Text("Speed")
+                } minimumValueLabel: {
+                    Text("Slow").font(.caption)
+                } maximumValueLabel: {
+                    Text("Fast").font(.caption)
+                }
+                Text(environment.settings.speechEngine == .qwen3
+                     ? "\(String(format: "%.2f", environment.settings.speechRate / 175.0))× playback speed. 175 is the voice's natural pace."
+                     : "\(Int(environment.settings.speechRate)) words per minute.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Stepper(value: bind(\.speechMaxCharacters), in: 100...4000, step: 100) {
+                    Text("Stop after \(environment.settings.speechMaxCharacters) characters")
+                }
+                Text("A long answer clipped at the nearest sentence. Qwen speaks at about real time, so an unclipped essay is a minute of talking.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     /// Handoff settings. The session is found by walking up from a running `claude`
@@ -196,7 +224,7 @@ struct SettingsView: View {
         Label("Everything you dictate — in every app, not just this one — is sent to Anthropic to be punctuated. That includes anything you'd never paste into a chatbot, and the CLI keeps a copy of each one on disk under ~/.claude. The other formatters never leave your Mac.",
               systemImage: "exclamationmark.triangle")
             .font(.caption).foregroundStyle(.orange)
-        Label("Expect two to five seconds before your text appears, and every dictation counts against your Claude plan's usage. Set the model to “haiku” to roughly halve the wait, at the price of occasionally mangling long dictations that continue existing text.",
+        Label("Expect two to five seconds before your text appears, and every dictation counts against your Claude plan's usage. The default “haiku” is the fastest; set “sonnet” if it ever softens your swearing or drops a word you meant.",
               systemImage: "clock")
             .font(.caption).foregroundStyle(.orange)
         if let path = ClaudeCLIFormatter.discoveredPath, environment.settings.formatterClaudePath.isEmpty {
@@ -204,6 +232,29 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         } else if environment.settings.formatterClaudePath.isEmpty {
             Text("Can't find the `claude` command — install it, or type its full path below (`which claude` in Terminal). Until then this falls back to basic cleanup on every utterance.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        TextField("CLI path (blank = find it automatically)", text: bind(\.formatterClaudePath))
+            .textFieldStyle(.roundedBorder)
+    }
+
+    /// Talk on the `claude` CLI. Same binary and same path setting as the `.claude`
+    /// formatter — there's one on the machine, so there's one place to point at it.
+    @ViewBuilder private var claudeTalkFields: some View {
+        TextField("Model", text: bind(\.talkClaudeModel))
+            .textFieldStyle(.roundedBorder)
+        Label("Your question, anything you had selected, and any screenshot go to Anthropic on your Claude plan, and the CLI keeps a copy of each one on disk under ~/.claude.",
+              systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(.orange)
+        Text("Expect a couple of seconds before the answer starts, and a couple more when a screenshot is attached — it gets saved to a scratch folder and read, which the other providers don't have to do. Set the model to “haiku” for faster, shallower answers.")
+            .font(.caption).foregroundStyle(.secondary)
+        if ClaudeCLIFormatter.resolveExecutable(explicitPath: environment.settings.formatterClaudePath) == nil {
+            Label("Can't find the `claude` command — install it, or type its full path below (`which claude` in Terminal). Until then questions fall through to your local server.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.orange)
+        } else if let path = ClaudeCLIFormatter.discoveredPath,
+                  environment.settings.formatterClaudePath.isEmpty {
+            Text("Using \(path).")
                 .font(.caption).foregroundStyle(.secondary)
         }
         TextField("CLI path (blank = find it automatically)", text: bind(\.formatterClaudePath))
@@ -238,10 +289,14 @@ struct SettingsView: View {
         if !environment.settings.talkVisionEnabled {
             return "Off: only your spoken question and any selected text are sent."
         }
-        let destination = environment.settings.talkProvider.isCloud
-            ? "uploaded to Google"
-            : "sent to your local server"
-        return "An image of your whole screen — every window on it, not just the one you're in — is \(destination) with each new question. Requires the Screen Recording permission."
+        let provider = environment.settings.talkProvider
+        let destination = provider.isCloud
+            ? "uploaded to \(provider.destinationPhrase)"
+            : "sent to \(provider.destinationPhrase)"
+        let staging = provider == .claudeCode
+            ? " It's written to a scratch folder on disk first, and deleted once the answer arrives."
+            : ""
+        return "An image of your whole screen — every window on it, not just the one you're in — is \(destination) with each new question.\(staging) Requires the Screen Recording permission."
     }
 
     @ViewBuilder private var localServerFields: some View {

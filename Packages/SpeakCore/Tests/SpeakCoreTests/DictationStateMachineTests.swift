@@ -249,6 +249,125 @@ struct DictationStateMachineTests {
         #expect(down.contains(.startCapture))
     }
 
+    // MARK: - Agent mode
+
+    /// Drive a chord press through to a transcript, returning the effects that
+    /// transcript produced.
+    private func runToTranscript(_ m: inout DictationStateMachine,
+                                 down: DictationEvent,
+                                 text: String) -> [Effect] {
+        m.handle(down)
+        m.handle(.minHoldElapsed)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+        return m.handle(.transcriptReady(text))
+    }
+
+    @Test("The agent chord runs the whole utterance as an agent task")
+    func agentChordRunsTheTask() {
+        var m = DictationStateMachine()
+
+        let down = m.handle(.agentDown)
+        #expect(m.mode == .agent)
+        #expect(m.state == .recording(.hold, minHoldPassed: false))
+        #expect(down == [.startCapture, .scheduleMinHoldTimer])
+
+        m.handle(.minHoldElapsed)
+        m.handle(.optionUp)
+        m.handle(.captureFinished(hasSpeech: true))
+
+        let effects = m.handle(.transcriptReady("open safari and search for tide times"))
+        #expect(effects == [.runAgent("open safari and search for tide times")])
+        #expect(m.state == .processing(.answering))
+        // The panel goes up now and narrates the run, exactly as Talk does.
+        #expect(m.hasAnswer)
+    }
+
+    @Test("The dictation chord is still dictation")
+    func dictationChordStaysDictation() {
+        var m = DictationStateMachine()
+        let effects = runToTranscript(&m, down: .optionDown, text: "hello world this is a test")
+        #expect(m.mode == .dictate)
+        #expect(effects.contains(.format("hello world this is a test")))
+    }
+
+    /// Parakeet answers a second of room tone with its best short guess. Typing
+    /// "Thank you." is fine; handing it to something that clicks is not.
+    @Test("Silence artifacts never reach the agent")
+    func silenceNeverStartsARun() {
+        var m = DictationStateMachine()
+        let effects = runToTranscript(&m, down: .agentDown, text: "Thank you.")
+        #expect(!effects.contains(.runAgent("Thank you.")))
+        #expect(m.state == .notice(.noSpeech))
+    }
+
+    @Test("A second agent request replaces the run in flight")
+    func agentChordRestartsAnActiveRun() {
+        var m = DictationStateMachine()
+        _ = runToTranscript(&m, down: .agentDown, text: "open safari")
+        #expect(m.state == .processing(.answering))
+
+        let effects = m.handle(.agentDown)
+        #expect(effects == [.cancelWork, .startCapture, .scheduleMinHoldTimer])
+        #expect(m.state == .recording(.hold, minHoldPassed: false))
+        #expect(m.mode == .agent)
+        // The panel stays up: the user is correcting a run they can still see.
+        #expect(m.hasAnswer)
+    }
+
+    /// Dictating into a document while the agent works is an ordinary thing to do,
+    /// and it must not silently kill the run.
+    @Test("The dictation chord leaves an active agent run alone")
+    func dictationChordDoesNotCancelARun() {
+        var m = DictationStateMachine()
+        _ = runToTranscript(&m, down: .agentDown, text: "open safari")
+
+        #expect(m.handle(.optionDown).isEmpty)
+        #expect(m.state == .processing(.answering))
+        #expect(m.mode == .agent)
+    }
+
+    @Test("Esc cancels an agent run and tears the panel down")
+    func escCancelsAnAgentRun() {
+        var m = DictationStateMachine()
+        _ = runToTranscript(&m, down: .agentDown, text: "open safari")
+
+        let effects = m.handle(.escPressed)
+        #expect(effects == [.cancelWork, .hideAnswerPanel, .endTalkThread])
+        #expect(m.state == .idle)
+        #expect(!m.hasAnswer)
+    }
+
+    /// Control is part of the agent chord, so a stray `.talkModifierEngaged` from a
+    /// future caller must not quietly turn an action run into a question.
+    @Test("An agent utterance is never demoted to Talk")
+    func agentIsNeverDemoted() {
+        var m = DictationStateMachine()
+        m.handle(.agentDown)
+        m.handle(.talkModifierEngaged)
+        #expect(m.mode == .agent)
+    }
+
+    @Test("The agent chord double-taps into hands-free, still as an agent task")
+    func agentChordLocks() {
+        var m = DictationStateMachine()
+        m.handle(.agentDown)
+        #expect(m.handle(.optionUp) == [.scheduleLockWindowTimer])
+        let down = m.handle(.agentDown)
+        #expect(m.state == .recording(.locked, minHoldPassed: true))
+        #expect(down.contains(.cancelLockWindowTimer))
+        #expect(m.mode == .agent)
+    }
+
+    @Test("Secure input disarms the agent chord too")
+    func agentChordBlockedBySecureInput() {
+        var m = DictationStateMachine()
+        m.handle(.secureInputChanged(true))
+        #expect(m.state == .blockedSecureInput)
+        #expect(m.handle(.agentDown).isEmpty)
+        #expect(m.state == .blockedSecureInput)
+    }
+
     // MARK: - Ignored / no-op transitions
 
     @Test("Stray events in idle are ignored")
