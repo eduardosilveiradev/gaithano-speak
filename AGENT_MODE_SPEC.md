@@ -31,7 +31,7 @@ This specification replaces the removed legacy agent implementation. It does not
 
 ### Transcription
 
-- Shortcut: Right Control + Right Option.
+- Shortcut: Right Command + Right Option.
 - Behavior: hold to record and release either key to finish.
 - Result: transcribe, format, and insert text at the cursor.
 - This shortcut never starts Agent Mode.
@@ -252,7 +252,7 @@ Agent Mode remains unavailable until microphone, Accessibility, Screen Recording
 
 ## Acceptance criteria
 
-1. Right Control + Right Option performs transcription and never starts Agent Mode.
+1. Right Command + Right Option performs transcription and never starts Agent Mode.
 2. Left Control + Left Option supports hold-to-speak and double-tap hands-free Agent Mode.
 3. A follow-up within 15 minutes retains context; a later request starts a new conversation.
 4. Every request starts on Sonnet. Escalation can move to Opus and then Fable 5.1, never downward during a run.

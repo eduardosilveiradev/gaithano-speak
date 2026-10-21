@@ -5,6 +5,8 @@ import Foundation
 /// Adding Control to whichever choice is active upgrades the utterance to Talk, so
 /// no option here may itself require Control — that gesture is spoken for.
 public enum HotkeyChoice: String, Codable, Sendable, CaseIterable {
+    /// Right Command + Right Option. The raw value is from when the chord was right
+    /// Control + Option, kept so stored preferences still decode.
     case rightControlRightOption
     case eitherOption
     case leftOption
@@ -17,7 +19,7 @@ public enum HotkeyChoice: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .rightControlRightOption: return "Right Control + Right Option (⌃⌥)"
+        case .rightControlRightOption: return "Right Command + Right Option (⌘⌥)"
         case .eitherOption: return "Either Option (⌥)"
         case .leftOption: return "Left Option (⌥)"
         case .rightOption: return "Right Option (⌥)"

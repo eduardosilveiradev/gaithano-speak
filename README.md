@@ -1,7 +1,7 @@
 # Gaithano Speak
 
 Local-first, system-wide voice dictation for macOS — a Wispr Flow–style app that
-runs entirely on your Mac. Hold Right Control + Right Option anywhere, speak, release, and polished text
+runs entirely on your Mac. Hold Right Command + Right Option anywhere, speak, release, and polished text
 is typed into whatever app you're in. No subscription.
 
 - **On-device STT** — NVIDIA Parakeet TDT v3 via [FluidAudio](https://github.com/FluidInference/FluidAudio) (CoreML/ANE).
@@ -49,7 +49,7 @@ uses whatever the `claude` CLI is already logged in as.
 
 ## Layout
 - `Packages/SpeakCore/` — pure, unit-tested core: the dictation state machine, personal dictionary, deterministic cleanup, prompt builder, settings, and the GRDB persistence layer. **No AppKit/CoreML deps** — runs under `swift test` in ~0.02s.
-- `GaithanoSpeak/` — the macOS app: audio capture, the global Right Control + Right Option hotkey, STT/formatter engines, text insertion, the floating overlay, menu bar, and settings/history/dictionary/onboarding UI.
+- `GaithanoSpeak/` — the macOS app: audio capture, the global Right Command + Right Option hotkey, STT/formatter engines, text insertion, the floating overlay, menu bar, and settings/history/dictionary/onboarding UI.
 - `Scripts/build-app.sh` — builds the executable and wraps it into a signed `.app`.
 - `Scripts/verify-checklist.md` — the manual test matrix.
 

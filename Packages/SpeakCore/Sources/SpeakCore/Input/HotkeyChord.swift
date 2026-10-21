@@ -4,7 +4,8 @@ import Foundation
 ///
 /// Sides are tracked separately because the two chords this app listens for differ
 /// *only* by side — right Control+Option dictates, left Control+Option runs the
-/// agent. `CGEventFlags.maskControl` and `.maskAlternate` are set by either side and
+/// agent. (Dictation is right Command+Option: the built-in keyboard has no right
+/// Control.) `CGEventFlags.maskControl` and `.maskAlternate` are set by either side and
 /// so cannot tell the two apart; the caller derives these bits from the
 /// device-dependent flags instead (`NX_DEVICEL*`/`NX_DEVICER*`), which is the only
 /// place the left/right distinction actually exists in an event.
@@ -16,13 +17,14 @@ public struct HeldModifiers: OptionSet, Sendable, Equatable {
     public static let rightControl = HeldModifiers(rawValue: 1 << 1)
     public static let leftOption   = HeldModifiers(rawValue: 1 << 2)
     public static let rightOption  = HeldModifiers(rawValue: 1 << 3)
+    public static let rightCommand = HeldModifiers(rawValue: 1 << 4)
 }
 
 /// A press-and-hold gesture. Two chords, two destinations, and no overlap: the side
 /// of the keyboard *is* the mode, so a user never has to remember a third key or
 /// watch the overlay to know where their words are going.
 public enum HotkeyChord: String, Sendable, Equatable, CaseIterable {
-    /// Right Control + Right Option — transcribe, format, insert at the cursor.
+    /// Right Command + Right Option — transcribe, format, insert at the cursor.
     case dictation
     /// Left Control + Left Option — hand the utterance to the agent.
     case agent
@@ -30,7 +32,7 @@ public enum HotkeyChord: String, Sendable, Equatable, CaseIterable {
     /// The keys that must be down for this chord to be engaged.
     public var required: HeldModifiers {
         switch self {
-        case .dictation: return [.rightControl, .rightOption]
+        case .dictation: return [.rightCommand, .rightOption]
         case .agent: return [.leftControl, .leftOption]
         }
     }

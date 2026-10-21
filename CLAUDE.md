@@ -54,7 +54,7 @@ HotkeyMonitor ─▶ RecordingCoordinator.handleHotkey ─▶ machine.handle(eve
 
 ### Non-obvious invariants
 
-**Two chords, and the side of the keyboard is the mode.** Right Control+Option dictates; left Control+Option runs the agent. Nothing else arms either one — no third key, no modifier arriving mid-utterance, so a user never has to watch the overlay to know where their words are going.
+**Two chords, and the side of the keyboard is the mode.** Right Command+Option dictates (the built-in keyboard has no right Control); left Control+Option runs the agent. Nothing else arms either one — no third key, no modifier arriving mid-utterance, so a user never has to watch the overlay to know where their words are going.
 
 **`.maskControl` and `.maskAlternate` cannot tell the sides apart, and that is the entire distinction.** Both are set by either side. `HotkeyMonitor` reads the device-dependent flag bits instead (`NX_DEVICELCTLKEYMASK` 0x1, `NX_DEVICERCTLKEYMASK` 0x2000, `NX_DEVICELALTKEYMASK` 0x20, `NX_DEVICERALTKEYMASK` 0x40, from `IOKit/hidsystem/IOLLEvent.h`) — the only place side survives in a `CGEvent`. State is recomputed in full on every `flagsChanged` rather than tracked as per-key transitions, so a missed event heals on the next one instead of leaving a chord stuck down. An earlier version read `.maskAlternate` for the right Option and got the wrong answer whenever the left one was also held.
 

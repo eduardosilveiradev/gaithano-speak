@@ -6,13 +6,13 @@ struct HotkeyChordTests {
 
     @Test("Each side resolves to its own chord")
     func sidesAreDistinct() {
-        #expect(ChordResolver.resolve(held: [.rightControl, .rightOption], active: nil) == .dictation)
+        #expect(ChordResolver.resolve(held: [.rightCommand, .rightOption], active: nil) == .dictation)
         #expect(ChordResolver.resolve(held: [.leftControl, .leftOption], active: nil) == .agent)
     }
 
     @Test("A chord needs both of its own keys")
     func partialChordsDoNotFire() {
-        #expect(ChordResolver.resolve(held: [.rightControl], active: nil) == nil)
+        #expect(ChordResolver.resolve(held: [.rightCommand], active: nil) == nil)
         #expect(ChordResolver.resolve(held: [.leftOption], active: nil) == nil)
         #expect(ChordResolver.resolve(held: [], active: nil) == nil)
     }
@@ -20,15 +20,20 @@ struct HotkeyChordTests {
     /// The whole reason sides are tracked separately: with only the generic
     /// `.maskControl` / `.maskAlternate` flags this combination is indistinguishable
     /// from either real chord.
+    @Test("Right Control no longer dictates")
+    func rightControlIsNotDictation() {
+        #expect(ChordResolver.resolve(held: [.rightControl, .rightOption], active: nil) == nil)
+    }
+
     @Test("Mixed sides are not a chord")
     func mixedSidesAreNotAChord() {
-        #expect(ChordResolver.resolve(held: [.rightControl, .leftOption], active: nil) == nil)
+        #expect(ChordResolver.resolve(held: [.rightCommand, .leftOption], active: nil) == nil)
         #expect(ChordResolver.resolve(held: [.leftControl, .rightOption], active: nil) == nil)
     }
 
     @Test("An unrelated modifier joining a held chord doesn't end it")
     func extraModifiersDoNotBreakAHold() {
-        let held: HeldModifiers = [.rightControl, .rightOption, .leftControl]
+        let held: HeldModifiers = [.rightCommand, .rightOption, .leftControl]
         #expect(ChordResolver.resolve(held: held, active: .dictation) == .dictation)
     }
 
@@ -36,7 +41,7 @@ struct HotkeyChordTests {
     /// going, so the chord that is already down wins over the one that isn't.
     @Test("With both chords satisfied, the active one wins")
     func activeChordWinsATie() {
-        let all: HeldModifiers = [.leftControl, .leftOption, .rightControl, .rightOption]
+        let all: HeldModifiers = [.leftControl, .leftOption, .rightCommand, .rightOption]
         #expect(ChordResolver.resolve(held: all, active: .agent) == .agent)
         #expect(ChordResolver.resolve(held: all, active: .dictation) == .dictation)
         // Nothing held yet: the everyday gesture breaks the tie.
@@ -45,7 +50,7 @@ struct HotkeyChordTests {
 
     @Test("Releasing part of the chord ends it")
     func releaseEndsTheChord() {
-        #expect(ChordResolver.resolve(held: [.rightControl], active: .dictation) == nil)
+        #expect(ChordResolver.resolve(held: [.rightCommand], active: .dictation) == nil)
         #expect(ChordResolver.resolve(held: [], active: .agent) == nil)
     }
 }

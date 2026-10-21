@@ -255,7 +255,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         return false
     }
 
-    /// Read left/right Control and Option out of an event's flags.
+    /// Read left/right Control and Option, and right Command, out of an event's flags.
     ///
     /// `.maskControl` / `.maskAlternate` are set by *either* side and so cannot tell
     /// ⌃⌥ on the right from ⌃⌥ on the left — which is the entire distinction between
@@ -269,6 +269,7 @@ final class HotkeyMonitor: @unchecked Sendable {
         if raw & 0x0000_2000 != 0 { held.insert(.rightControl) }
         if raw & 0x0000_0020 != 0 { held.insert(.leftOption) }
         if raw & 0x0000_0040 != 0 { held.insert(.rightOption) }
+        if raw & 0x0000_0010 != 0 { held.insert(.rightCommand) }
         return held
     }
 
