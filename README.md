@@ -1,13 +1,11 @@
 # Gaithano Speak
 
 Local-first, system-wide voice dictation for macOS — a Wispr Flow–style app that
-runs entirely on your Mac. Hold a key anywhere, speak, release, and polished text
+runs entirely on your Mac. Hold Right Command + Right Option anywhere, speak, release, and polished text
 is typed into whatever app you're in. No subscription.
 
 - **On-device STT** — NVIDIA Parakeet TDT v3 via [FluidAudio](https://github.com/FluidInference/FluidAudio) (CoreML/ANE).
 - **On-device formatting** — Apple Intelligence (Foundation Models) cleans fillers, punctuation, and casing; falls back to deterministic cleanup when unavailable.
-- **Claude Code handoff** — hold ⌃⌥ instead of ⌥ and your words are typed straight into the terminal running Claude Code and submitted. It finds the session by walking the process tree, so any terminal works and there's nothing to configure.
-- **Talk mode** — turn the handoff off and ⌃⌥ asks a model instead, with the answer in a panel rather than typed. ⌘C copies it, ⌘↩ inserts it, esc closes.
 - **Private by default** — audio never leaves the machine, and with the default formatter neither does the text.
 
 ### What leaves your Mac
@@ -20,25 +18,38 @@ Two things can send your words off the machine, and both are choices you make:
   Anthropic to be punctuated, and the CLI keeps a copy of each one on disk under
   `~/.claude`. Expect two to five seconds per dictation, billed against your Claude
   plan's usage. The other three formatters never leave your Mac.
-- **Talk (⌃⌥) sends what you ask.** Nothing below applies unless you hold Control.
 - With the default **Vertex AI** provider, a Talk question sends your transcribed
   words, any text you had selected, and the name of the frontmost app to Google.
 - **Vision is off by default.** Turning it on additionally uploads a screenshot of
   your whole screen — every window visible on it, not just the one you're working
   in — with each new question, and needs the Screen Recording permission.
+- Choosing the **Claude (claude CLI)** provider sends the same things to Anthropic
+  instead, on your Claude plan, and the CLI keeps a copy of each question on disk
+  under `~/.claude`. With vision on, the screenshot is written to a scratch folder
+  so the CLI can read it, and deleted once the answer arrives.
 - Choosing the **local server** provider (LM Studio / Ollama) keeps Talk on-device
-  too. It's also the automatic fallback when Vertex is unconfigured or unreachable.
+  too. It's also the automatic fallback when a cloud provider is unconfigured or
+  unreachable — including when the `claude` command can't be found.
+- **Reading answers aloud keeps everything local.** Speech is off by default. Turned
+  on, it speaks Talk answers only — never your dictation, and
+  never anything handed to Claude Code. The Qwen3-TTS engine runs on your machine
+  through MLX, and the macOS engine is the system's own voice; neither sends any
+  text anywhere.
 
 Vertex uses your existing gcloud credentials (`gcloud auth application-default
-login`) — there's no API key to paste and no account with us.
+login`) — there's no API key to paste and no account with us. The Claude provider
+uses whatever the `claude` CLI is already logged in as.
 
 ## Requirements
 - Apple Silicon Mac, macOS 26+
 - Xcode 26 (for the macOS 26 SDK)
+- Optional, only for the Qwen3-TTS voice: a Python with `mlx-audio` installed. Point
+  Settings → Speech at it, or leave the field blank to have the usual locations
+  searched. The macOS voice needs nothing.
 
 ## Layout
 - `Packages/SpeakCore/` — pure, unit-tested core: the dictation state machine, personal dictionary, deterministic cleanup, prompt builder, settings, and the GRDB persistence layer. **No AppKit/CoreML deps** — runs under `swift test` in ~0.02s.
-- `GaithanoSpeak/` — the macOS app: audio capture, the global hotkey (CGEventTap on Option), STT/formatter engines, text insertion, the floating overlay, menu bar, and settings/history/dictionary/onboarding UI.
+- `GaithanoSpeak/` — the macOS app: audio capture, the global Right Command + Right Option hotkey, STT/formatter engines, text insertion, the floating overlay, menu bar, and settings/history/dictionary/onboarding UI.
 - `Scripts/build-app.sh` — builds the executable and wraps it into a signed `.app`.
 - `Scripts/verify-checklist.md` — the manual test matrix.
 

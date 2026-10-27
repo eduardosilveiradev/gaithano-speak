@@ -6,7 +6,7 @@ import SpeakCore
 /// This replaced `VertexFormatter` as the cloud formatting option. It buys the same
 /// thing — a real model that fixes grammar the on-device one is blind to — off the
 /// user's existing Claude subscription rather than a GCP project with billing that
-/// can lapse. Talk and the agent still run on Vertex; only the dictation correction
+/// can lapse. Talk still runs on Vertex; only the dictation correction
 /// pass moved.
 ///
 /// Two properties of this path are worth knowing before touching it:
@@ -47,7 +47,7 @@ import SpeakCore
 struct ClaudeCLIFormatter {
     struct Config: Sendable {
         /// Model alias or id passed to `--model`. See `AppSettings.formatterClaudeModel`
-        /// for why the default is Sonnet rather than Haiku.
+        /// for why the default is Haiku.
         var model: String
         /// Explicit path to the `claude` binary. Blank falls back to `discoveredPath`.
         /// A GUI app inherits a bare PATH from launchd, so the usual install locations
@@ -137,7 +137,14 @@ struct ClaudeCLIFormatter {
     }
 
     private static func resolve(_ config: Config) -> URL? {
-        let explicit = config.executablePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        resolveExecutable(explicitPath: config.executablePath)
+    }
+
+    /// The user's explicit path if they set one, else wherever the CLI was found.
+    /// Internal because `ClaudeCodeTalkProvider` runs the same binary — everything
+    /// this file knows about locating and configuring it is shared, not duplicated.
+    static func resolveExecutable(explicitPath: String) -> URL? {
+        let explicit = explicitPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !explicit.isEmpty {
             guard FileManager.default.isExecutableFile(atPath: explicit) else { return nil }
             return URL(fileURLWithPath: explicit)
@@ -147,7 +154,7 @@ struct ClaudeCLIFormatter {
 
     /// An empty directory of our own, so CLAUDE.md discovery walking up from the cwd
     /// finds nothing to load.
-    private static let workingDirectory: URL = {
+    static let workingDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let dir = base.appendingPathComponent("GaithanoSpeak/claude-cwd", isDirectory: true)
@@ -190,7 +197,7 @@ struct ClaudeCLIFormatter {
     /// knob that looks like it should and the measurements say otherwise (726 tokens
     /// at low vs 580 at medium, i.e. noise). Removing them puts eight seconds back on
     /// every dictation.
-    private static func childEnvironment() -> [String: String] {
+    static func childEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let inherited = environment["PATH"] ?? ""
         let installDirs = candidatePaths.map {

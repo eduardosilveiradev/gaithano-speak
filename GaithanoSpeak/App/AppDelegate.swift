@@ -19,5 +19,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Normal termination takes the conversation's screenshots and tool log with it.
+    /// A crash can't, which is why `startMonitoring` also purges at launch.
+    func applicationWillTerminate(_ notification: Notification) {
+        let scratch = environment.coordinator.agentScratch
+        // Blocking on the way out is the point: after this returns the process is gone,
+        // and an async cleanup would simply not happen.
+        let done = DispatchSemaphore(value: 0)
+        Task.detached { await scratch.purgeAll(); done.signal() }
+        _ = done.wait(timeout: .now() + 2)
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 }

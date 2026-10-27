@@ -4,6 +4,11 @@ import Foundation
 
 @Suite("App settings persistence")
 struct SettingsTests {
+    @Test("Default hotkey is Right Command plus Right Option")
+    func defaultHotkeyChord() {
+        #expect(AppSettings.default.hotkey.displayName == "Right Command + Right Option (⌘⌥)")
+    }
+
 
     @Test("Round-trips through a UserDefaults store")
     func roundTrip() throws {

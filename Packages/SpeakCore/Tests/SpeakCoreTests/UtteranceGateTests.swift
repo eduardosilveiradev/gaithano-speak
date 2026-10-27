@@ -66,17 +66,6 @@ struct SilenceGateReducerTests {
         return m
     }
 
-    /// The bug this gate exists for: the agent took a screenshot and started clicking
-    /// on the strength of a transcript nobody spoke.
-    @Test("An artifact transcript never starts an agent run")
-    func agentRefusesArtifact() {
-        var m = machine(mode: .agentModifierEngaged)
-        let effects = m.handle(.transcriptReady("Thank you."))
-        #expect(effects == [.scheduleNoticeDismiss])
-        #expect(m.state == .notice(.noSpeech))
-        #expect(!m.hasAnswer)
-    }
-
     @Test("An artifact transcript never asks Talk a question")
     func talkRefusesArtifact() {
         var m = machine(mode: .talkModifierEngaged)
@@ -96,14 +85,6 @@ struct SilenceGateReducerTests {
         let effects = m.handle(.transcriptReady("Thank you."))
         #expect(effects.contains(.format("Thank you.")))
         #expect(m.state == .processing(.formatting))
-    }
-
-    @Test("A real spoken task still runs the agent")
-    func realTaskRuns() {
-        var m = machine(mode: .agentModifierEngaged)
-        let effects = m.handle(.transcriptReady("open my calendar"))
-        #expect(effects == [.runAgent("open my calendar")])
-        #expect(m.state == .processing(.answering))
     }
 
     /// An artifact arriving as a follow-up must abandon only that question — the

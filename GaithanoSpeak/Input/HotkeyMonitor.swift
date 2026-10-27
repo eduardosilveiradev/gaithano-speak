@@ -5,27 +5,49 @@ import SpeakCore
 
 /// Events the hotkey layer emits (a subset of `DictationEvent`).
 enum HotkeyEvent: Sendable {
-    case optionDown
-    case optionUp
+    /// One of the two chords went down. Which one decides where the utterance goes,
+    /// and it is fixed at this moment — see `HotkeyChord`.
+    case chordDown(HotkeyChord)
+    case chordUp(HotkeyChord)
     case otherKeyWhileOptionHeld
     case escPressed
-    /// Control joined the dictation key — upgrade this utterance to Talk.
-    case talkModifierEngaged
-    /// Control *and* Shift joined the dictation key — upgrade to the agent.
-    case agentModifierEngaged
     /// ⌘C while an answer is on screen.
     case copyAnswer
     /// ⌘⏎ while an answer is on screen: insert it at the cursor.
     case insertAnswer
-    /// ⏎ while the agent is waiting on a risky step: allow just that step.
-    case agentConfirm
-    /// A while the agent is waiting: allow this and every later step this run.
-    case agentAuto
 }
 
-/// Watches for the push-to-talk key system-wide using an active `CGEventTap` on a
-/// dedicated run-loop thread. Never consumes the Option key (so ⌥-combos keep
-/// working); consumes Esc only while a dictation is active.
+/// The keyboard half of the Agent Mode approval gate.
+///
+/// Deliberately its own enum rather than three more `HotkeyEvent` cases. Adding a
+/// case to `HotkeyEvent` breaks the exhaustive switch in `RecordingCoordinator`,
+/// which is owned elsewhere while Agent Mode is being built in parallel — and a
+/// separate channel is the version of this that merges cleanly. Fold it into
+/// `HotkeyEvent` once the coordinator handles it; the case names are already the
+/// ones it will want.
+enum HotkeyApprovalEvent: Sendable {
+    /// `Y` — run the held call once.
+    case approvalAllow
+    /// `N` — refuse this one call and let the model reconsider.
+    case approvalDeny
+    /// `A` — approve every remaining action for the rest of this request.
+    case approvalAllowAll
+
+    /// The decision to hand the gate. Named the same as the panel's buttons emit, so
+    /// the keyboard and the mouse cannot drift apart.
+    var decision: ApprovalDecision {
+        switch self {
+        case .approvalAllow: return .allow
+        case .approvalDeny: return .deny
+        case .approvalAllowAll: return .allowAll
+        }
+    }
+}
+
+/// Watches for the two push-to-talk chords system-wide using an active `CGEventTap`
+/// on a dedicated run-loop thread. Never consumes a modifier (so ⌃⌥-combos keep
+/// working); consumes Esc only while a dictation is active, and the bare letters
+/// `Y` / `N` / `A` only while an Agent Mode approval is actually pending.
 final class HotkeyMonitor: @unchecked Sendable {
     private var tapPort: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -36,28 +58,33 @@ final class HotkeyMonitor: @unchecked Sendable {
 
     // Configuration + live state, guarded by `lock`.
     private let lock = NSLock()
-    private var choice: HotkeyChoice = .rightOption
-    private var optionHeld = false
+    /// The chord currently held, or nil. Also the `wasHeld` flag the keyDown path
+    /// reads to spot a modifier combo.
+    private var activeChord: HotkeyChord?
     private var active = false   // recording or processing — controls Esc consumption
     private var panelPresented = false  // an answer is on screen — enables ⌘C / ⌘⏎ / Esc
-    private var agentAwaitingConfirm = false  // enables bare ⏎ / A
+    private var approvalPending = false // the agent is stopped at the gate — enables Y / N / A
 
     /// Called on the main actor for each hotkey event.
     var onEvent: (@Sendable (HotkeyEvent) -> Void)?
 
-    private static let kLeftOption: Int64 = 58
-    private static let kRightOption: Int64 = 61
-    private static let kLeftControl: Int64 = 59
-    private static let kRightControl: Int64 = 62
-    private static let kFn: Int64 = 63
+    /// Called on the main actor when the user answers an approval from the keyboard.
+    /// Only ever fires while `setApprovalPending(true)` is in force.
+    var onApprovalEvent: (@Sendable (HotkeyApprovalEvent) -> Void)?
+
     private static let kEsc: Int64 = 53
     private static let kC: Int64 = 8
     private static let kReturn: Int64 = 36
     private static let kA: Int64 = 0
+    private static let kY: Int64 = 16
+    private static let kN: Int64 = 45
 
-    func updateChoice(_ choice: HotkeyChoice) {
-        lock.lock(); self.choice = choice; lock.unlock()
-    }
+    /// Every modifier that makes a keypress something other than a bare letter.
+    /// `.maskNonCoalesced` and friends are always set on a real event, so testing
+    /// `flags.isEmpty` would never be true and the approval keys would never fire.
+    private static let modifierMask: CGEventFlags = [
+        .maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn
+    ]
 
     /// Whether a dictation is active (set by the coordinator) — gates Esc consumption.
     func setActive(_ active: Bool) {
@@ -70,11 +97,15 @@ final class HotkeyMonitor: @unchecked Sendable {
         lock.lock(); self.panelPresented = presented; lock.unlock()
     }
 
-    /// Whether the agent is parked on a confirmation. Only while this is true do we
-    /// consume bare Return and A — they're ordinary typing the rest of the time, and
-    /// swallowing them unconditionally would break every text field on the machine.
-    func setAgentAwaitingConfirmation(_ awaiting: Bool) {
-        lock.lock(); self.agentAwaitingConfirm = awaiting; lock.unlock()
+    /// Whether Agent Mode is holding a tool call at the approval gate.
+    ///
+    /// This flag is the entire licence to consume `Y`, `N` and `A`. They are ordinary
+    /// letters, so a wider window would swallow a keystroke out of every text field on
+    /// the machine — the same reason ⌘C is only taken while an answer panel is up. It
+    /// must be cleared the moment the gate resolves, including when the run is
+    /// cancelled or fails out from under it.
+    func setApprovalPending(_ pending: Bool) {
+        lock.lock(); self.approvalPending = pending; lock.unlock()
     }
 
     func start() {
@@ -145,72 +176,38 @@ final class HotkeyMonitor: @unchecked Sendable {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
         lock.lock()
-        let choice = self.choice
-        let wasHeld = self.optionHeld
+        let wasHeld = self.activeChord != nil
         let isActive = self.active
         let hasPanel = self.panelPresented
-        let awaitingConfirm = self.agentAwaitingConfirm
+        let hasApproval = self.approvalPending
         lock.unlock()
 
         if type == .flagsChanged {
-            let hasControl = event.flags.contains(.maskControl)
-            // Control arriving while the dictation key is already down upgrades the
-            // in-flight utterance to Talk. This lands here rather than in
-            // `matchesChoice` because Control is never itself a dictation key — and
-            // because a modifier is a `flagsChanged`, not a `keyDown`, so it can't
-            // trip the `otherKeyWhileOptionHeld` passthrough below.
-            if wasHeld && hasControl {
-                // Both, in this order. Control alone now means the agent, so the second
-                // event is unconditional — but the Talk event still has to come first,
-                // and first: the coordinator drops the agent event when the feature is
-                // off, and the reducer refuses to demote an utterance that already
-                // reached `.agent`, so the pair resolves correctly either way.
-                emit(.talkModifierEngaged)
-                emit(.agentModifierEngaged)
-            }
-
-            let isOurKey = matchesChoice(keyCode: keyCode, choice: choice)
-            guard isOurKey else { return false }
-            let nowDown = isHeld(flags: event.flags, choice: choice)
-            if nowDown && !wasHeld {
-                lock.lock(); optionHeld = true; lock.unlock()
-                emit(.optionDown)
-                // Control-then-Option ordering: the upgrade check above only fires
-                // when Option was already down, so cover the reverse order here.
-                if hasControl {
-                    emit(.talkModifierEngaged)
-                    emit(.agentModifierEngaged)
-                }
-            } else if !nowDown && wasHeld {
-                lock.lock(); optionHeld = false; lock.unlock()
-                emit(.optionUp)
+            // Recompute the whole picture from this event rather than tracking
+            // per-key transitions: `flagsChanged` carries the full modifier state, so
+            // a missed event (the tap being re-enabled after a timeout, a key released
+            // while another app had a higher-priority tap) heals on the next one
+            // instead of leaving a chord stuck down.
+            let held = Self.heldModifiers(in: event.flags)
+            lock.lock()
+            let previous = activeChord
+            let resolved = ChordResolver.resolve(held: held, active: previous)
+            activeChord = resolved
+            lock.unlock()
+            if resolved != previous {
+                if let previous { emit(.chordUp(previous)) }
+                if let resolved { emit(.chordDown(resolved)) }
             }
             return false // never consume the modifier
         }
 
         if type == .keyDown {
             if keyCode == Self.kEsc {
-                if isActive || hasPanel {
+                if isActive || hasPanel || hasApproval {
                     emit(.escPressed)
                     return true // consume Esc while active or showing an answer
                 }
                 return false
-            }
-            // Agent confirmation. Ahead of the answer-panel block so a bare Return
-            // approves the step rather than falling through, and consumed so the
-            // keystroke can't also reach the app the agent is about to act on.
-            if awaitingConfirm {
-                let flags = event.flags
-                let bare = !flags.contains(.maskCommand) && !flags.contains(.maskControl)
-                    && !flags.contains(.maskAlternate)
-                if bare && keyCode == Self.kReturn {
-                    emit(.agentConfirm)
-                    return true
-                }
-                if bare && keyCode == Self.kA {
-                    emit(.agentAuto)
-                    return true
-                }
             }
             // Answer-panel shortcuts. Consumed so they don't also reach the app
             // underneath — ⌘C especially would otherwise clobber the user's clipboard
@@ -228,7 +225,27 @@ final class HotkeyMonitor: @unchecked Sendable {
                     return true
                 }
             }
-            // Any other key while our Option is physically held → modifier combo.
+            // Agent Mode approval keys, bare only. A modified press (⌘A, ⌃N) belongs
+            // to whatever app is frontmost and passes straight through; only the
+            // unmodified letter is ours, and only inside the gate's window.
+            if hasApproval && event.flags.intersection(Self.modifierMask).isEmpty {
+                let decision: HotkeyApprovalEvent? = switch keyCode {
+                case Self.kY: .approvalAllow
+                case Self.kN: .approvalDeny
+                case Self.kA: .approvalAllowAll
+                default: nil
+                }
+                if let decision {
+                    // Autorepeat is consumed but not emitted: holding `A` down would
+                    // otherwise resolve this approval and then race the next one the
+                    // runtime raises, answering a question the user never read.
+                    if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                        emitApproval(decision)
+                    }
+                    return true
+                }
+            }
+            // Any other key while one of our chords is physically held → combo.
             if wasHeld {
                 emit(.otherKeyWhileOptionHeld)
             }
@@ -238,26 +255,31 @@ final class HotkeyMonitor: @unchecked Sendable {
         return false
     }
 
-    /// Whether this `flagsChanged` came from the key that arms dictation.
-    private func matchesChoice(keyCode: Int64, choice: HotkeyChoice) -> Bool {
-        switch choice {
-        case .eitherOption: return keyCode == Self.kLeftOption || keyCode == Self.kRightOption
-        case .leftOption: return keyCode == Self.kLeftOption
-        case .rightOption: return keyCode == Self.kRightOption
-        case .fn: return keyCode == Self.kFn
-        }
-    }
-
-    /// Whether the gesture's modifier is currently down, per the event flags.
-    private func isHeld(flags: CGEventFlags, choice: HotkeyChoice) -> Bool {
-        switch choice {
-        case .fn: return flags.contains(.maskSecondaryFn)
-        case .eitherOption, .leftOption, .rightOption: return flags.contains(.maskAlternate)
-        }
+    /// Read left/right Control and Option, and right Command, out of an event's flags.
+    ///
+    /// `.maskControl` / `.maskAlternate` are set by *either* side and so cannot tell
+    /// ⌃⌥ on the right from ⌃⌥ on the left — which is the entire distinction between
+    /// dictating and running the agent. The device-dependent bits below
+    /// (`NX_DEVICEL*` / `NX_DEVICER*`, from `IOKit/hidsystem/IOLLEvent.h`) are the
+    /// only place that side survives in a `CGEvent`.
+    private static func heldModifiers(in flags: CGEventFlags) -> HeldModifiers {
+        let raw = flags.rawValue
+        var held: HeldModifiers = []
+        if raw & 0x0000_0001 != 0 { held.insert(.leftControl) }
+        if raw & 0x0000_2000 != 0 { held.insert(.rightControl) }
+        if raw & 0x0000_0020 != 0 { held.insert(.leftOption) }
+        if raw & 0x0000_0040 != 0 { held.insert(.rightOption) }
+        if raw & 0x0000_0010 != 0 { held.insert(.rightCommand) }
+        return held
     }
 
     private func emit(_ event: HotkeyEvent) {
         let handler = onEvent
+        DispatchQueue.main.async { handler?(event) }
+    }
+
+    private func emitApproval(_ event: HotkeyApprovalEvent) {
+        let handler = onApprovalEvent
         DispatchQueue.main.async { handler?(event) }
     }
 }

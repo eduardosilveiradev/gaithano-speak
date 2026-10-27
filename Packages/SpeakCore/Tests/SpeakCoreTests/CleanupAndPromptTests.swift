@@ -269,6 +269,7 @@ struct PromptContextTests {
     func instructionsCoverGrammar() {
         #expect(PromptBuilder.instructions.contains("subject-verb agreement"))
         #expect(PromptBuilder.instructions.contains("Duplicated words"))
+        #expect(PromptBuilder.instructions.contains("Scaffolding is NOT the same as hedges, swearing, or slang"))
     }
 
     /// Parakeet hands over near-uncased text, so casing is the formatter's job and

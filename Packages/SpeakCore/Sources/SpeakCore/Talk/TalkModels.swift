@@ -3,11 +3,13 @@ import Foundation
 /// Which backend answers a Talk question.
 public enum TalkProviderID: String, Codable, Sendable, CaseIterable {
     case vertexGemini
+    case claudeCode
     case localServer
 
     public var displayName: String {
         switch self {
         case .vertexGemini: return "Gemini (Vertex AI)"
+        case .claudeCode: return "Claude (claude CLI)"
         case .localServer: return "Local LLM (LM Studio / Ollama)"
         }
     }
@@ -15,8 +17,19 @@ public enum TalkProviderID: String, Codable, Sendable, CaseIterable {
     /// Whether this provider sends the question — and any screenshot — off the machine.
     public var isCloud: Bool {
         switch self {
-        case .vertexGemini: return true
+        case .vertexGemini, .claudeCode: return true
         case .localServer: return false
+        }
+    }
+
+    /// Where a question goes, in the second half of a sentence. Used by Settings to
+    /// name the destination rather than saying "the cloud" and leaving the user to
+    /// guess whose.
+    public var destinationPhrase: String {
+        switch self {
+        case .vertexGemini: return "Google"
+        case .claudeCode: return "Anthropic"
+        case .localServer: return "your local server"
         }
     }
 }
@@ -84,6 +97,10 @@ public struct TalkConfig: Sendable {
     public var model: String
     /// OpenAI-compatible base URL, used only by `.localServer`.
     public var endpoint: String
+    /// Explicit path to the `claude` binary, used only by `.claudeCode`. Blank means
+    /// "find it", which is the normal case — see `AppSettings.formatterClaudePath` for
+    /// why a GUI app can't just trust PATH.
+    public var executablePath: String
     /// GCP project, used only by `.vertexGemini`. Falls back to the ADC quota project.
     public var projectID: String?
     /// Vertex region. `global` matches the default used elsewhere in these projects.
@@ -97,6 +114,7 @@ public struct TalkConfig: Sendable {
     public init(provider: TalkProviderID,
                 model: String,
                 endpoint: String = "",
+                executablePath: String = "",
                 projectID: String? = nil,
                 region: String = "global",
                 thinkingBudget: Int = 0,
@@ -105,6 +123,7 @@ public struct TalkConfig: Sendable {
         self.provider = provider
         self.model = model
         self.endpoint = endpoint
+        self.executablePath = executablePath
         self.projectID = projectID
         self.region = region
         self.thinkingBudget = thinkingBudget

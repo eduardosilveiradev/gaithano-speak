@@ -15,11 +15,13 @@ public enum UtteranceMode: Equatable, Sendable {
     case dictate
     /// Control+Option — transcribe, ask a model, show the answer in a panel.
     case talk
-    /// Control+Shift+Option — transcribe, then let the model act on the screen.
+    /// Left Control + Left Option — transcribe, then hand the task to the agent,
+    /// which reasons and acts through bounded tools while the panel narrates it.
     ///
-    /// A strict upgrade of `.talk`: same capture, same panel, but the model gets
-    /// tools. It is a separate mode rather than a flag on `.talk` because the
-    /// difference is not cosmetic — one reads the screen, the other changes it.
+    /// A separate mode rather than a flag on `.talk` because the difference is not
+    /// cosmetic: one reads the screen, the other changes it. Chosen by the chord at
+    /// press time (see `HotkeyChord`), never by a modifier arriving mid-utterance —
+    /// which is why there is no `agentModifierEngaged` to match the other two.
     case agent
     /// Control+Option, when the user has pointed that gesture at Claude Code —
     /// transcribe, then type the words into the terminal running a Claude Code
@@ -114,6 +116,11 @@ public enum DictationState: Equatable, Sendable {
 /// free of any clock.
 public enum DictationEvent: Equatable, Sendable {
     case optionDown
+    /// The agent chord went down. A sibling of `.optionDown` rather than a mode
+    /// argument on it, because the two chords genuinely differ in one place —
+    /// pressing the agent chord while an agent run is still working restarts it,
+    /// while pressing the dictation chord leaves that run alone.
+    case agentDown
     case optionUp
     case escPressed
     /// A non-Option key was pressed while Option was physically held — the user
@@ -139,11 +146,6 @@ public enum DictationEvent: Equatable, Sendable {
     /// May arrive at `optionDown` (Control already held) or mid-capture (Control
     /// pressed after Option). Sticky: releasing Control does not revert it.
     case talkModifierEngaged
-    /// Shift joined Control+Option — this utterance is an agent task. Sticky in the
-    /// same way, and one-directional: an utterance can be upgraded to `.agent` but
-    /// never downgraded back to `.talk`, so letting go of Shift mid-sentence can't
-    /// quietly turn an approved action run into something else.
-    case agentModifierEngaged
     /// Control joined Option and the user has pointed that gesture at Claude Code.
     /// Sticky like the other two, and it outranks them: the coordinator only emits
     /// one of the three, but the reducer refuses the demotion anyway so an ordering
@@ -177,7 +179,7 @@ public enum Effect: Equatable, Sendable {
     case playStopSound
     /// Ask the configured Talk provider, streaming the answer into the panel.
     case answer(String)
-    /// Hand the transcript to the agent runner, which will act on the screen.
+    /// Hand the transcript to the agent, which reasons and acts through its tools.
     case runAgent(String)
     /// Type the transcript into the terminal running Claude Code. Carries the raw
     /// transcript; the coordinator cleans it on the way out — see
@@ -274,13 +276,7 @@ public struct DictationStateMachine: Sendable {
         if case .talkModifierEngaged = event {
             // Never demote an already-upgraded utterance: Control and Shift arrive as
             // separate events, so a Control that lands after Shift must not undo it.
-            if state.isRecording, mode != .agent, mode != .handoff { mode = .talk }
-            return []
-        }
-        if case .agentModifierEngaged = event {
-            // Handoff outranks the agent. The coordinator emits only one of these, so
-            // this can't fire today — it's here so that stops being load-bearing.
-            if state.isRecording, mode != .handoff { mode = .agent }
+            if state.isRecording, mode != .handoff, mode != .agent { mode = .talk }
             return []
         }
         if case .handoffModifierEngaged = event {
@@ -326,15 +322,22 @@ public struct DictationStateMachine: Sendable {
     private mutating func handleIdle(_ event: DictationEvent) -> [Effect] {
         switch event {
         case .optionDown:
-            // Provisional: capture silently, no feedback yet — feedback waits for
-            // the grace period so a quick Option+key combo stays a no-op.
-            // Every utterance starts as dictation; `.talkModifierEngaged` upgrades it.
-            mode = .dictate
-            state = .recording(.hold, minHoldPassed: false)
-            return [.startCapture, .scheduleMinHoldTimer]
+            return beginCapture(as: .dictate)
+        case .agentDown:
+            return beginCapture(as: .agent)
         default:
             return []
         }
+    }
+
+    /// Start capturing, provisionally: no sound, no overlay commit, no media pause
+    /// until the grace period elapses, so a quick chord+key combo stays a silent
+    /// no-op. The chord decides the mode here; `.talkModifierEngaged` /
+    /// `.handoffModifierEngaged` can still upgrade a `.dictate` utterance later.
+    private mutating func beginCapture(as mode: UtteranceMode) -> [Effect] {
+        self.mode = mode
+        state = .recording(.hold, minHoldPassed: false)
+        return [.startCapture, .scheduleMinHoldTimer]
     }
 
     private mutating func handleBlocked(_ event: DictationEvent) -> [Effect] {
@@ -375,8 +378,10 @@ public struct DictationStateMachine: Sendable {
             state = hasAnswer ? .answerPresented : .idle
             return [.stopCaptureDiscard, .passThroughModifier]
 
-        case (.locked, .optionDown):
-            // A press in locked mode stops dictation.
+        case (.locked, .optionDown), (.locked, .agentDown):
+            // A press of either chord in locked mode stops dictation. Either, because
+            // the gesture that ends a hands-free session is "press again", and a user
+            // who reached for the wrong side wants it stopped, not restarted.
             state = .processing(.transcribing)
             return [.stopCapture, .playStopSound]
 
@@ -396,8 +401,9 @@ public struct DictationStateMachine: Sendable {
 
     private mutating func handleAwaitingLockTap(_ event: DictationEvent) -> [Effect] {
         switch event {
-        case .optionDown:
+        case .optionDown, .agentDown:
             // Second press within the window → lock hands-free. Audio continues.
+            // The mode was set by the first press and is deliberately left alone.
             // This is the commit point for the double-tap gesture.
             state = .recording(.locked, minHoldPassed: true)
             return [.cancelLockWindowTimer, .playStartSound]
@@ -418,6 +424,18 @@ public struct DictationStateMachine: Sendable {
 
     private mutating func handleProcessing(phase: ProcessingPhase, event: DictationEvent) -> [Effect] {
         switch event {
+        case .agentDown where phase == .answering && mode == .agent:
+            // A second agent request while the first is still working replaces it:
+            // the user watched it go wrong and is correcting it, and queueing the
+            // correction behind the run it is meant to stop would be the worst of
+            // both. The panel stays up — `hasAnswer` is untouched — so the run being
+            // replaced is still visible while the replacement is spoken.
+            //
+            // Only the agent chord does this. The dictation chord falls through to
+            // `default` and is ignored, so dictating into a document mid-run does not
+            // silently kill the run.
+            return [.cancelWork] + beginCapture(as: .agent)
+
         case .escPressed:
             // Cancelling mid-answer tears down the panel and the conversation.
             if phase == .answering {
@@ -546,9 +564,12 @@ public struct DictationStateMachine: Sendable {
             // about the answer that's on screen — taking it away mid-question would
             // remove the thing they're looking at. The dictate path clears both when
             // the transcript lands instead.
-            mode = .dictate
-            state = .recording(.hold, minHoldPassed: false)
-            return [.startCapture, .scheduleMinHoldTimer]
+            return beginCapture(as: .dictate)
+
+        case .agentDown where !secureInputActive:
+            // Same reasoning, and more of it: a follow-up task is almost always about
+            // what the last run left on screen.
+            return beginCapture(as: .agent)
 
         default:
             return []
@@ -562,9 +583,9 @@ public struct DictationStateMachine: Sendable {
             return []
         case .optionDown where !secureInputActive:
             // Start a new (provisional) dictation, dismissing the notice.
-            mode = .dictate
-            state = .recording(.hold, minHoldPassed: false)
-            return [.startCapture, .scheduleMinHoldTimer]
+            return beginCapture(as: .dictate)
+        case .agentDown where !secureInputActive:
+            return beginCapture(as: .agent)
         default:
             return []
         }

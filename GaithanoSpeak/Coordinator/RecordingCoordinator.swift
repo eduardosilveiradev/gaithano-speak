@@ -21,6 +21,14 @@ final class RecordingCoordinator {
     private(set) var answerText: String = ""
     /// Which mode the current (or just-finished) utterance is in, for the overlay.
     private(set) var mode: UtteranceMode = .dictate
+    /// Everything the Agent Mode panel draws. Nil when no run has happened yet, which
+    /// is also what takes the panel off screen — see `AgentPanelController`.
+    ///
+    /// Folded from `AgentEvent`s and never mutated field-by-field: `AgentTranscript.apply`
+    /// is where the invariants live (escalation only climbs, allow-all dies with the
+    /// run, an interrupted step stays interrupted), and reaching around it is how those
+    /// stop being true.
+    private(set) var agentTranscript: AgentTranscript?
     /// Whether the overlay should draw the answer panel. Mirrors the reducer's
     /// `hasAnswer` rather than `state.showsAnswerPanel`, because during a follow-up
     /// the state is `.recording` while the panel must stay on screen.
@@ -52,6 +60,20 @@ final class RecordingCoordinator {
     private let claudeFormatter = ClaudeCLIFormatter()
     private let handoff = ClaudeCodeHandoff()
     private let localTalk = LocalServerTalkProvider()
+    private let agentRuntime = ClaudeAgentRuntime()
+    let agentScratch = AgentScratchStore()
+    private let agentScreenshots: ScreenshotService
+    /// Built lazily on the first agent run: it launches three MCP subprocesses, and the
+    /// overwhelming majority of this app's use never asks for an agent.
+    private var agentProxy: MCPApprovalProxy?
+    private var agentEventTask: Task<Void, Never>?
+    /// The continuation the MCP proxy is suspended on while an approval is on screen.
+    /// Exactly one can exist — the proxy holds the tool call until it resumes, so a
+    /// second prompt cannot appear behind the first.
+    private var pendingApproval: CheckedContinuation<ApprovalDecision, Never>?
+    /// Identifies the current agent request to the proxy, which keys the "allow all"
+    /// grant by it. A grant whose id doesn't match the active run is not in force.
+    private var agentRunID: String?
 
     var settings: AppSettings
     private var dictionary = PersonalDictionary()
@@ -78,18 +100,13 @@ final class RecordingCoordinator {
     private var contextTask: Task<Void, Never>?
     private var answerTask: Task<Void, Never>?
 
-    /// Built lazily, on the first agent run, so the ordinary dictation path never
-    /// constructs it. Readable so the overlay can render its step list directly —
-    /// mirroring it into a second observable would just be a way to show something
-    /// other than what is actually about to happen.
-    private(set) var agentRunner: AgentRunner?
-
-    /// The step list to draw, or nil when this utterance isn't an agent one. The
-    /// runner is kept between runs, so without the mode check a later Talk answer
-    /// would appear underneath the previous run's steps.
-    var agentSession: AgentSession? {
-        mode == .agent ? agentRunner?.session : nil
-    }
+    /// Built on first use and torn down when the engine changes or speech is switched
+    /// off — the Qwen sidecar holds four gigabytes, so it must not outlive the setting.
+    private var speech: (any SpeechOutput)?
+    private var speechEngine: SpeechEngineID?
+    /// Cuts the answer stream into speakable sentences. Non-nil only while a streamed
+    /// answer is in flight; an agent summary arrives whole and leaves this alone.
+    private var answerSplitter: SpeechText.SentenceSplitter?
 
     // Cancellable timers / tasks.
     private var minHoldTask: Task<Void, Never>?
@@ -148,6 +165,7 @@ final class RecordingCoordinator {
         self.database = database
         self.hotkeyMonitor = hotkeyMonitor
         self.settings = settings
+        self.agentScreenshots = ScreenshotService(scratch: agentScratch)
         recorder.prewarm()
     }
 
@@ -155,34 +173,27 @@ final class RecordingCoordinator {
 
     func handleHotkey(_ event: HotkeyEvent) {
         switch event {
-        case .optionDown: send(.optionDown)
-        case .optionUp: send(.optionUp)
+        case .chordDown(.dictation): send(.optionDown)
+        case .chordDown(.agent): send(.agentDown)
+        // Which chord came up doesn't matter: only one can be held at a time, and
+        // releasing it always means "I'm done speaking".
+        case .chordUp: send(.optionUp)
         case .otherKeyWhileOptionHeld: send(.otherKeyWhileOptionHeld)
-        case .escPressed: send(.escPressed)
-        case .talkModifierEngaged:
-            guard settings.talkEnabled else { return }
-            // Handoff claims the gesture outright: nothing of ours answers, so there's
-            // no context to capture and no panel to fill.
-            if settings.claudeCodeHandoffEnabled {
-                send(.handoffModifierEngaged)
+        case .escPressed:
+            // Escape belongs to the agent run while its panel is up. The run may be
+            // parked at an approval with the mic long since closed — a state the
+            // dictation reducer knows nothing about. First press stops the run, second
+            // takes the panel down.
+            if let transcript = agentTranscript {
+                if transcript.phase.isActive {
+                    cancelAgentRun()
+                } else {
+                    endAgentConversation()
+                    send(.escPressed)
+                }
                 return
             }
-            // Capture what the user is looking at NOW, while they're still speaking,
-            // so a screenshot + AX read never shows up in answer latency.
-            captureTalkContextIfNeeded()
-            send(.talkModifierEngaged)
-        case .agentModifierEngaged:
-            // Requires both consents: Talk off means the gesture never got as far as
-            // a model, and agent off means it stays a question rather than an action —
-            // which is the only way to reach plain Talk now that ⌃⌥ arms the agent.
-            // Handoff outranks both; it already claimed this utterance above.
-            guard settings.talkEnabled, settings.agentEnabled,
-                  !settings.claudeCodeHandoffEnabled else { return }
-            send(.agentModifierEngaged)
-        case .agentConfirm:
-            agentRunner?.confirm()
-        case .agentAuto:
-            agentRunner?.enableAuto()
+            send(.escPressed)
         case .copyAnswer:
             SmartInserter.copyToClipboard(answerText)
         case .insertAnswer:
@@ -196,7 +207,6 @@ final class RecordingCoordinator {
 
     func updateSettings(_ new: AppSettings) {
         settings = new
-        hotkeyMonitor.updateChoice(new.hotkey)
     }
 
     func reloadDictionary() {
@@ -214,7 +224,10 @@ final class RecordingCoordinator {
     private func send(_ event: DictationEvent) {
         let effects = machine.handle(event)
         mode = machine.mode
-        showsAnswerPanel = machine.hasAnswer
+        // The reducer's `hasAnswer` is what keeps ⌘C / ⌘⏎ / Esc pointed at the answer
+        // rather than at the app underneath, and an agent run needs all of that. What it
+        // must not do is raise the *Talk* panel on top of the agent's own.
+        showsAnswerPanel = machine.hasAnswer && machine.mode != .agent
         let newState = machine.state
         if newState != state {
             let wasCommitted = state.isCommitted
@@ -302,10 +315,9 @@ final class RecordingCoordinator {
             currentRaw = question
             answer(question)
         case let .runAgent(task):
-            // The agent does resume now, and for the opposite reason: its
-            // `.answerPresented` doesn't arrive until the entire run ends — many steps,
-            // possibly parked on a confirmation the user hasn't answered. Waiting for
-            // that would leave the music off for minutes.
+            // Give the music back now rather than at `.answerReady`: an agent run is
+            // many steps long and possibly parked on an approval, and holding the
+            // pause across all of that would leave the user in silence for minutes.
             media.resumeIfPaused()
             currentRaw = task
             runAgent(task)
@@ -320,7 +332,11 @@ final class RecordingCoordinator {
             // Taking the panel down ends the run: the step list was the only place the
             // user could see what was happening, so leaving it clicking away behind a
             // closed panel is exactly the thing this feature must never do.
-            stopAgent()
+            // Same reasoning for the voice. Esc dismissing the answer and the machine
+            // carrying on reading it aloud would leave the user with no way to shut it
+            // up short of quitting.
+            speech?.stop()
+            answerSplitter = nil
             answerText = ""
             streamStarted = false
         case .endTalkThread:
@@ -349,6 +365,11 @@ final class RecordingCoordinator {
         if settings.formattingEnabled && settings.preferredFormatter == .foundationModel {
             formatter.prewarm()
         }
+        // Same bargain for the voice, and a much longer one to hide: Qwen3-TTS takes
+        // ~13s to load. Warming at the start of every recording — not just a Talk one —
+        // is deliberate, because the mode isn't decided until the modifier is read, and
+        // by then the user is already mid-sentence.
+        prewarmSpeech()
         // Start the output-level tap as early as possible. With `minHold` at 0 the
         // pause decision lands on the very next hop, well before the tap's first
         // buffer, so `MediaPlaybackController` waits for a real reading rather than
@@ -607,6 +628,11 @@ final class RecordingCoordinator {
         // `answerText` is deliberately left alone — a follow-up keeps the previous
         // answer visible until its own first token arrives.
         streamStarted = false
+        // Fresh splitter per answer, and stop whatever the last one was still saying.
+        speech?.stop()
+        answerSplitter = settings.speechEnabled
+            ? SpeechText.SentenceSplitter(limit: settings.speechMaxCharacters)
+            : nil
         talkHistory = talkThread
         // If the screenshot is still being captured, wait for it — but never let a
         // stuck capture hold the answer hostage.
@@ -638,6 +664,7 @@ final class RecordingCoordinator {
                 self.talkThread = thread + [TalkTurn(role: .assistant, text: full)]
                 self.answerText = full
                 self.send(.answerReady)
+                self.speakAnswer(full)
             } catch {
                 if Task.isCancelled { return }
                 let reason = Self.describe(error)
@@ -649,40 +676,278 @@ final class RecordingCoordinator {
 
     // MARK: - Agent
 
-    /// Hand the transcript to the agent and let it drive.
+    /// Hand the transcript to the agent.
     ///
-    /// Unlike `answer`, this has no local fallback. The local server has no function
-    /// calling, and an agent that can't call tools is not a degraded agent — it's a
-    /// model narrating clicks it will never make, at the price of a real run.
+    /// Not built yet — the chord, the reducer path, and the mode all run end to end,
+    /// but the Claude Code session, the MCP proxy, and the approval gate that
+    /// `AGENT_MODE_SPEC.md` describes do not exist. Failing loudly is the point:
+    /// quietly falling back to dictation would type a task meant for the agent into
+    /// whatever document the user happened to be looking at.
     private func runAgent(_ task: String) {
-        let runner = agentRunner ?? {
-            let created = AgentRunner(model: AgentModel(credentials: credentials,
-                                                        config: settings.talkConfig))
-            created.onConfirmationChanged = { [weak self] awaiting in
-                self?.hotkeyMonitor.setAgentAwaitingConfirmation(awaiting)
-            }
-            created.onEnded = { [weak self] summary in
-                guard let self else { return }
-                self.hotkeyMonitor.setAgentAwaitingConfirmation(false)
-                self.answerText = summary
-                self.send(.answerReady)
-            }
-            agentRunner = created
-            return created
-        }()
+        // The panel is the whole of the agent's UI, so it goes up before anything can
+        // fail — a run that dies during setup has to be visible dying, not silent.
+        var transcript = agentTranscript ?? AgentTranscript()
+        transcript.apply(.requestStarted(task))
+        agentTranscript = transcript
+        hotkeyMonitor.setApprovalPending(false)
 
-        answerText = ""
-        streamStarted = true   // the panel is showing steps, not a stream to swap in
-        runner.start(task: task, autoConfirm: settings.agentAutoConfirm)
+        let runID = UUID().uuidString
+        agentRunID = runID
+
+        Task { @MainActor in
+            guard let proxy = await self.preparedProxy() else {
+                self.applyAgentEvent(.failed("Agent Mode has no tools: its MCP servers "
+                                             + "couldn't start. Check Settings."))
+                return
+            }
+            await proxy.beginRun(id: runID)
+            self.agentRuntime.configuration = .init(
+                executablePath: self.settings.formatterClaudePath,
+                mcpConfigPath: MCPServerConfig.writeProxyConfig(),
+                allowedTools: [MCPServerConfig.allowedToolsArgument],
+                stallTimeout: self.settings.agentStallTimeoutSeconds)
+            self.agentRuntime.start(request: task)
+        }
+    }
+
+    /// Build the proxy on first use and connect whatever downstream servers exist.
+    ///
+    /// `connect` never throws: a server that won't start is one unavailable capability,
+    /// not a dead session, which is the spec's rule and the reason a machine without
+    /// SmartThings still gets desktop control.
+    private func preparedProxy() async -> MCPApprovalProxy? {
+        if let agentProxy { return agentProxy }
+        let proxy = MCPApprovalProxy(
+            gate: self,
+            observer: self,
+            controlHandler: { [weak self] tool, arguments in
+                guard let self, tool == AgentModelRouter.escalateTool else {
+                    return "Escalation unavailable — continue the request yourself."
+                }
+                let reason: String
+                if case let .string(text)? = arguments["reason"] { reason = text } else { reason = "" }
+                return await MainActor.run {
+                    self.agentRuntime.escalationAcknowledgement(callID: tool, reason: reason)
+                }
+            })
+        let paths = MCPServerConfig.Paths(macosServer: settings.agentMacOSMCPPath,
+                                          smartThingsAdapter: settings.agentSmartThingsMCPPath,
+                                          nodeRunner: settings.agentNodeRunnerPath)
+        await proxy.connect(MCPServerConfig.launches(paths: paths))
+        Task { await proxy.listen(atPath: MCPServerConfig.socketPath) }
+        agentProxy = proxy
+        startAgentEventPump()
+        return proxy
+    }
+
+    /// One consumer for the life of the app. The runtime's stream never finishes, so
+    /// this task is started once and deliberately never awaited.
+    private func startAgentEventPump() {
+        guard agentEventTask == nil else { return }
+        let events = agentRuntime.events
+        agentEventTask = Task { @MainActor [weak self] in
+            for await event in events { self?.applyAgentEvent(event) }
+        }
+    }
+
+    /// The single door into the transcript. Everything that has to happen *alongside* a
+    /// fold — the hotkey's licence to eat Y/N/A, ending the proxy's run, speaking the
+    /// answer — hangs off here so it cannot be forgotten at one of the call sites.
+    private func applyAgentEvent(_ event: AgentEvent) {
+        var transcript = agentTranscript ?? AgentTranscript()
+        transcript.apply(event)
+        agentTranscript = transcript
+
+        // The entire licence to consume three bare letters system-wide. Left true after
+        // a run dies under a pending prompt, the user loses Y, N and A in every text
+        // field on the machine — so it is derived from the transcript rather than set
+        // by whoever happened to raise the prompt.
+        hotkeyMonitor.setApprovalPending(transcript.pendingApproval != nil)
+        // Escape has to reach a run that is parked at an approval with the mic long
+        // since closed, so "active" spans the whole run and not just the recording.
+        //
+        // It spans the *finished* run too. The agent panel stays up after a failure to
+        // show what went wrong, and `showsAnswerPanel` is false in agent mode, so a
+        // transcript that had stopped being `.isActive` left Esc reaching neither the
+        // monitor's active branch nor its panel branch — the one key the panel tells
+        // the user to press did nothing, and the error stayed on screen until the next
+        // agent press. While a transcript exists, the panel is up and Esc closes it.
+        hotkeyMonitor.setActive(state.isRecording || state.isProcessing || agentTranscript != nil)
+
+        // The reducer parked in `.processing(.answering)` when `.runAgent` was emitted
+        // and has no other way out. Miss this and the dictation hotkey stays dead for
+        // the rest of the session — the single most expensive bug this wiring can have.
+        switch event {
+        case let .responseFinished(text):
+            endAgentRun()
+            // So ⌘C and ⌘⏎ act on the agent's answer, the same as a Talk one.
+            answerText = text
+            send(.answerReady)
+            // Speech happens here and not on `.responseDelta`: the deltas include the
+            // model narrating intermediate turns ("Opening Safari…"), and the spec
+            // allows only the user-facing answer to be read aloud.
+            speakAnswer(text)
+        case let .failed(reason):
+            endAgentRun()
+            send(.answerFailed(reason))
+        case .cancelled:
+            endAgentRun()
+            if state.isProcessing { send(.escPressed) }
+        default:
+            break
+        }
+    }
+
+    /// Stop the run without taking the panel down — the user still needs to see what
+    /// happened before it stopped.
+    private func cancelAgentRun() {
+        // A prompt on screen is a tool call suspended inside the proxy. It has to be
+        // answered, and the only answer that leaves nothing running is no.
+        if let continuation = pendingApproval {
+            pendingApproval = nil
+            continuation.resume(returning: .deny)
+        }
+        if agentRuntime.isRunning {
+            agentRuntime.cancel()        // emits `.cancelled`; the fold does the rest
+        } else {
+            applyAgentEvent(.cancelled)  // nothing to stop, but the run must still end
+        }
+    }
+
+    /// Expire the proxy's per-run state. Called on every ending, and the `beginRun` on
+    /// the next request clears it again — the grant is keyed by run id precisely so a
+    /// missed call here still cannot leak blanket approval into a follow-up.
+    private func endAgentRun() {
+        agentRunID = nil
+        guard let proxy = agentProxy else { return }
+        Task { await proxy.endRun() }
+    }
+
+    /// Answer whichever prompt is on screen. Buttons and keys converge here — the keys
+    /// carry no id because the user is answering what they can see.
+    func resolveApproval(decision: ApprovalDecision) {
+        guard let id = agentTranscript?.pendingApproval?.id else { return }
+        resolveApproval(id: id, decision: decision)
+    }
+
+    func resolveApproval(id: String, decision: ApprovalDecision) {
+        guard let continuation = pendingApproval else { return }
+        pendingApproval = nil
+        // Resume the held tool call *first*. Folding the event without resuming would
+        // show the user a decision the suspended call never received.
+        continuation.resume(returning: decision)
+        applyAgentEvent(.approvalResolved(id: id, decision: decision))
+    }
+
+    /// Tear the run and its conversation down: Escape on a settled run, or the
+    /// 15-minute idle expiry. Takes the panel with it — nothing hides it on a timer.
+    func endAgentConversation() {
+        agentRuntime.cancel()
+        agentRuntime.reset()
+        // A prompt on screen when the conversation ends is a tool call still suspended
+        // in the proxy. Denying it is the only ending that leaves nothing running.
+        if let continuation = pendingApproval {
+            pendingApproval = nil
+            continuation.resume(returning: .deny)
+        }
+        endAgentRun()
+        agentTranscript = nil
+        hotkeyMonitor.setApprovalPending(false)
+        // The panel is gone, so Esc belongs to whatever the user is typing into again.
+        hotkeyMonitor.setActive(state.isRecording || state.isProcessing)
+        let proxy = agentProxy
+        Task { await proxy?.shutdown(); await agentScratch.reset() }
+        agentProxy = nil
+    }
+
+    /// Delete anything a conversation left behind once it has been idle 15 minutes.
+    /// The store owns no clock of its own — every timer in this app is the
+    /// coordinator's, and a second one would be a second answer to "is this over".
+    func expireAgentConversationIfIdle() async {
+        guard agentTranscript != nil, !(agentTranscript?.phase.isActive ?? false) else { return }
+        if await agentScratch.expireIfIdle(agentRuntime.conversation) {
+            endAgentConversation()
+        }
+    }
+
+    // MARK: - Speech
+
+    /// Read an answer out loud, if the user asked for that.
+    ///
+    /// Answers only. Three paths deliberately never reach here:
+    ///
+    /// * **Dictation.** The text is going into the user's document as they watch. Saying
+    ///   it back is noise, and this is the one path where latency is the whole product.
+    /// * **The Claude Code handoff.** ⌃⌥ with `claudeCodeHandoffEnabled` types into a
+    ///   terminal; there is no answer, only a prompt the user is about to watch run.
+    /// * **`ClaudeCLIFormatter`.** It drives `claude -p` non-interactively as part of
+    ///   formatting, and its output is dictation — see above. Nothing on that path calls
+    ///   this, and the gate below means that even if something did, it would stay silent
+    ///   unless the user had explicitly switched speech on.
+    private func speakAnswer(_ text: String) {
+        let config = settings.speechConfig
+        guard config.enabled else { return }
+
+        // A streamed answer has already been spoken sentence by sentence; all that is
+        // left is whatever came after the last sentence break. Re-speaking the whole
+        // thing here is the obvious bug this guards against — it would read the answer
+        // twice, the second time over the top of the first.
+        if var splitter = answerSplitter {
+            let tail = splitter.finish()
+            answerSplitter = nil
+            if let tail, let output = speechOutput(for: config) {
+                output.enqueue(tail, config: config)
+            }
+            return
+        }
+
+        // Not streamed — an agent summary arrives whole.
+        guard let spoken = SpeechText.spoken(from: text, limit: config.maxCharacters) else {
+            return
+        }
+        speechOutput(for: config)?.speak(spoken, config: config)
+    }
+
+    /// Speak a fixed line, for the Test voice button in Settings. Ignores
+    /// `speechEnabled` on purpose: the user pressed a button that says "test", and
+    /// making them switch the feature on first to hear whether it works is backwards.
+    func speakSample() {
+        var config = settings.speechConfig
+        config.enabled = true
+        speechOutput(for: config)?.speak(
+            "Gaithano Speak is ready. This is how answers will sound.", config: config)
+    }
+
+    /// Start the engine loading before there is anything to say.
+    ///
+    /// Qwen takes ~13s to become usable, so doing this lazily would mean the first
+    /// answer of every session is read out long after the user has finished reading it
+    /// themselves. Called when a Talk or agent utterance *starts*, which is the same
+    /// bargain `formatter.prewarm()` makes on the dictation path.
+    private func prewarmSpeech() {
+        let config = settings.speechConfig
+        guard config.enabled else { return }
+        speechOutput(for: config)?.prewarm(config: config)
+    }
+
+    /// Build the synthesiser, replacing it if the engine changed. Switching away from
+    /// Qwen shuts its sidecar down rather than leaving the weights resident.
+    private func speechOutput(for config: SpeechConfig) -> (any SpeechOutput)? {
+        if let speech, speechEngine == config.engine { return speech }
+        (speech as? QwenSpeechOutput)?.shutdown()
+        let created: any SpeechOutput
+        switch config.engine {
+        case .system: created = SystemSpeechOutput()
+        case .qwen3: created = QwenSpeechOutput()
+        }
+        speech = created
+        speechEngine = config.engine
+        return created
     }
 
     /// Idempotent, and safe to call when nothing is running — every panel-dismissal
     /// path goes through it.
-    private func stopAgent() {
-        guard let agentRunner else { return }
-        agentRunner.stop()
-        hotkeyMonitor.setAgentAwaitingConfirmation(false)
-    }
+
 
     /// Run the configured provider, falling back to the local server when a cloud
     /// provider is unusable — an unconfigured or offline Vertex shouldn't mean no
@@ -695,15 +960,20 @@ final class RecordingCoordinator {
             Task { @MainActor in self?.appendAnswerDelta(delta) }
         }
 
-        guard config.provider == .vertexGemini else {
+        let cloud: TalkProvider
+        switch config.provider {
+        case .localServer:
             return try await local.answer(request, config: config, onDelta: onDelta)
+        case .vertexGemini:
+            cloud = VertexTalkProvider(credentials: credentials)
+        case .claudeCode:
+            cloud = ClaudeCodeTalkProvider()
         }
 
-        let vertex = VertexTalkProvider(credentials: credentials)
         do {
-            return try await vertex.answer(request, config: config, onDelta: onDelta)
+            return try await cloud.answer(request, config: config, onDelta: onDelta)
         } catch let error as TalkError where error.isFallbackWorthy {
-            Log.talk.notice("Vertex unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
+            Log.talk.notice("\(config.provider.rawValue, privacy: .public) unusable (\(Self.describe(error), privacy: .public)); falling back to the local server")
             // Drop anything the failed attempt streamed so the two don't concatenate.
             streamStarted = false
             var localConfig = config
@@ -722,6 +992,23 @@ final class RecordingCoordinator {
         // appends to it.
         if !streamStarted { answerText = ""; streamStarted = true }
         answerText += delta
+        speakStreamingDelta(delta)
+    }
+
+    /// Feed the stream to the voice a sentence at a time.
+    ///
+    /// Qwen synthesises at about 1× realtime, so speaking only on `.answerReady` means
+    /// the user waits for the whole answer to arrive and then waits again for it to be
+    /// read. Splitting on sentences overlaps the two, and turns the wait into the
+    /// length of the first sentence.
+    private func speakStreamingDelta(_ delta: String) {
+        let config = settings.speechConfig
+        guard config.enabled, var splitter = answerSplitter else { return }
+        defer { answerSplitter = splitter }
+        guard let output = speechOutput(for: config) else { return }
+        for sentence in splitter.accept(delta) {
+            output.enqueue(sentence, config: config)
+        }
     }
 
     /// Insert the answer at the cursor (⌘⏎), then dismiss the panel.
@@ -813,6 +1100,55 @@ final class RecordingCoordinator {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             if Task.isCancelled { return }
             action()
+        }
+    }
+}
+
+// MARK: - The approval gate
+
+/// The coordinator is the gate because the gate needs the user, and the user is at the
+/// panel the coordinator drives. The proxy deliberately knows nothing about either.
+extension RecordingCoordinator: AgentApprovalGate {
+
+    /// Suspend the tool call until the user answers.
+    ///
+    /// The suspension is the enforcement: the downstream MCP server has not been sent
+    /// anything yet, so "deny" means the action never happened rather than that it was
+    /// undone. There is no timeout on purpose — a prompt that expires into a default
+    /// answer is a prompt that eventually answers itself.
+    func decide(_ request: AgentApprovalRequest) async -> ApprovalDecision {
+        // The proxy already checked this, but it is cheap and it is the difference
+        // between one forgotten `endRun` and a follow-up inheriting blanket approval.
+        if agentTranscript?.allowAllForRun == true { return .allowAll }
+
+        return await withCheckedContinuation { continuation in
+            // Only one can be outstanding: the proxy is suspended right here, so it
+            // cannot ask a second question until this returns. If one is somehow
+            // already parked, refuse the newcomer rather than orphan the old call.
+            guard pendingApproval == nil else {
+                continuation.resume(returning: .deny)
+                return
+            }
+            pendingApproval = continuation
+            applyAgentEvent(.approvalRequested(request))
+        }
+    }
+}
+
+// MARK: - Step reporting
+
+extension RecordingCoordinator: AgentProxyObserver {
+
+    /// `nonisolated` because the proxy is an actor calling this synchronously from its
+    /// own executor. Hopping here rather than making the proxy await the main actor
+    /// keeps a slow SwiftUI render off the path a tool call waits on.
+    nonisolated func proxyDidUpdate(call: AgentToolCall, status: AgentStepStatus, detail: String?) {
+        Task { @MainActor in
+            // The step id is the tool call id, which is also the approval id — that
+            // shared identity is what lets the panel draw "you denied this" against the
+            // step it applied to instead of in a list of its own.
+            let step = AgentStep(id: call.id, call: call, status: status, result: detail)
+            self.applyAgentEvent(.step(step))
         }
     }
 }

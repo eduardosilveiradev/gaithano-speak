@@ -14,6 +14,11 @@ enum Log {
     static let insert = Logger(subsystem: subsystem, category: "insert")
     static let coordinator = Logger(subsystem: subsystem, category: "coordinator")
     static let talk = Logger(subsystem: subsystem, category: "talk")
+    /// Agent Mode: the Claude Code session, the MCP proxy, screenshots, and preflight.
+    /// One category rather than four, because reading an agent run means reading all of
+    /// them interleaved — a tool call, the approval it waited on, and the capture that
+    /// verified it are one story.
+    static let agent = Logger(subsystem: subsystem, category: "agent")
 
     static let signposter = OSSignposter(subsystem: subsystem, category: "latency")
 }

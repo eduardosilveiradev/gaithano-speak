@@ -2,7 +2,23 @@ import SwiftUI
 import AppKit
 import SpeakCore
 
+/// `@main` lives here rather than on `GaithanoSpeakApp` so the relay check runs before
+/// AppKit does anything at all.
+///
+/// Claude Code spawns its stdio MCP servers itself, so whatever `--mcp-config` names has
+/// to be an executable — but the approval gate needs the *running* app, where the panel
+/// and the user are. So the executable is this same binary, launched with a socket path,
+/// doing nothing but copying stdin to that socket and back. Without this call Claude Code
+/// spawns a second copy of the GUI app instead of a server, and Agent Mode silently has
+/// no tools whatsoever.
 @main
+enum GaithanoSpeakMain {
+    static func main() {
+        MCPApprovalProxy.runRelayIfRequested()   // never returns when it is the relay
+        GaithanoSpeakApp.main()
+    }
+}
+
 struct GaithanoSpeakApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
