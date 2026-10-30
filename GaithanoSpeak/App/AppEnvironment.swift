@@ -106,6 +106,8 @@ final class AppEnvironment {
         )
 
         wire()
+        // The Otto keyboard's dictations arrive here by way of the Otto server.
+        DictationSocket.start(coordinator: coordinator)
     }
 
     private func wire() {

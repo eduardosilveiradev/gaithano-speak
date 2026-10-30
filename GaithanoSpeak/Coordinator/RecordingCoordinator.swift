@@ -466,85 +466,106 @@ final class RecordingCoordinator {
         let hasSurroundingText = [context.precedingText, context.followingText]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .contains { !$0.isEmpty }
+        workTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let (text, used) = await self.clean(raw, hints: hints, hasSurroundingText: hasSurroundingText,
+                                                learn: true, separateAtEnd: true)
+            if Task.isCancelled { return }
+            self.currentFormatter = used
+            self.send(.formatReady(text))
+        }
+    }
+
+    /// Steps 1–4 of a dictation after transcription: dictionary, formatter, repairs, seam.
+    /// Shared by the hotkey path and `dictateRemote`, so a phone dictation gets exactly
+    /// what one spoken here would. `learn` is off for remote ones: their corrections
+    /// can't be watched, so there is nothing to learn from.
+    private func clean(_ raw: String, hints: FormattingHints, hasSurroundingText: Bool,
+                       learn: Bool, separateAtEnd: Bool) async -> (String, FormatterID) {
         let settings = self.settings
         let dictionary = self.dictionary
         let formatter = self.formatter
         let localServer = self.localServer
         let claudeFormatter = self.claudeFormatter
         let deterministic = self.deterministic
+        // 1. Deterministic dictionary pre-pass.
+        var text = dictionary.apply(raw)
+        var used: FormatterID = .deterministic
 
-        workTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            // 1. Deterministic dictionary pre-pass.
-            var text = dictionary.apply(raw)
-            var used: FormatterID = .deterministic
+        // The Apple on-device model, a local OpenAI-compatible server (LM Studio /
+        // Ollama), and Haiku via the `claude` CLI are all "model" formatters that
+        // go through the same gate.
+        let usesModel = settings.preferredFormatter == .foundationModel
+            || settings.preferredFormatter == .localServer
+            || settings.preferredFormatter == .claude
 
-            // The Apple on-device model, a local OpenAI-compatible server (LM Studio /
-            // Ollama), and Haiku via the `claude` CLI are all "model" formatters that
-            // go through the same gate.
-            let usesModel = settings.preferredFormatter == .foundationModel
-                || settings.preferredFormatter == .localServer
-                || settings.preferredFormatter == .claude
-
-            if settings.formattingEnabled
-                && usesModel
-                && PromptBuilder.shouldUseModel(for: text, hasSurroundingText: hasSurroundingText)
-                && text.count <= PromptBuilder.maxCharsForModel {
-                do {
-                    let result: FormattedResult
-                    if settings.preferredFormatter == .localServer {
-                        let config = LocalServerFormatter.Config(endpoint: settings.localServerURL,
-                                                                 model: settings.localServerModel)
-                        result = try await localServer.format(text, hints: hints, config: config)
-                    } else if settings.preferredFormatter == .claude {
-                        let config = ClaudeCLIFormatter.Config(
-                            model: settings.formatterClaudeModel,
-                            executablePath: settings.formatterClaudePath)
-                        result = try await claudeFormatter.format(text, hints: hints, config: config)
-                    } else {
-                        result = try await formatter.format(text, hints: hints)
-                    }
-                    // Snapshot the pair before anything else touches it. `text` here
-                    // is still exactly what the model was handed.
-                    if settings.dictionaryLearningEnabled {
-                        self.pendingLearning = (heard: text, written: result.text)
-                    }
-                    text = result.text
-                    used = result.formatter
-                } catch {
-                    text = DeterministicCleanup.clean(text)
-                    used = .deterministic
+        if settings.formattingEnabled
+            && usesModel
+            && PromptBuilder.shouldUseModel(for: text, hasSurroundingText: hasSurroundingText)
+            && text.count <= PromptBuilder.maxCharsForModel {
+            do {
+                let result: FormattedResult
+                if settings.preferredFormatter == .localServer {
+                    let config = LocalServerFormatter.Config(endpoint: settings.localServerURL,
+                                                             model: settings.localServerModel)
+                    result = try await localServer.format(text, hints: hints, config: config)
+                } else if settings.preferredFormatter == .claude {
+                    let config = ClaudeCLIFormatter.Config(
+                        model: settings.formatterClaudeModel,
+                        executablePath: settings.formatterClaudePath)
+                    result = try await claudeFormatter.format(text, hints: hints, config: config)
+                } else {
+                    result = try await formatter.format(text, hints: hints)
                 }
-            } else if settings.formattingEnabled {
-                let result = (try? await deterministic.format(text, hints: hints))
-                text = result?.text ?? DeterministicCleanup.clean(text)
+                // Snapshot the pair before anything else touches it. `text` here
+                // is still exactly what the model was handed.
+                if learn && settings.dictionaryLearningEnabled {
+                    self.pendingLearning = (heard: text, written: result.text)
+                }
+                text = result.text
+                used = result.formatter
+            } catch {
+                text = DeterministicCleanup.clean(text)
                 used = .deterministic
             }
-
-            // 2. Dictionary post-pass (the model may re-break replaced terms).
-            text = dictionary.apply(text)
-            // 3. Safety net: collapse accidental doubled words the model missed.
-            text = TextRepair.removeAccidentalDuplicates(text)
-            // 4. Spacing at the insertion point.
-            if hasSurroundingText {
-                // The field is readable and already has text: on the deterministic/
-                // short path the model never saw the context, so fix casing here
-                // (mid-sentence continuations shouldn't capitalize), then compute the
-                // exact leading seam — one space, or none before punctuation.
-                if settings.formattingEnabled && used == .deterministic {
-                    text = TextRepair.lowercaseContinuationIfMidSentence(text, precedingText: hints.precedingText)
-                }
-                text = TextRepair.joinAtCursor(text, precedingText: hints.precedingText)
-            } else {
-                // Can't see the field (empty, or an Electron/web app like Claude
-                // Desktop that hides its text): append a trailing space so back-to-
-                // back dictations stay separated.
-                text = TextRepair.appendSeparatorSpace(text)
-            }
-            if Task.isCancelled { return }
-            self.currentFormatter = used
-            self.send(.formatReady(text))
+        } else if settings.formattingEnabled {
+            let result = (try? await deterministic.format(text, hints: hints))
+            text = result?.text ?? DeterministicCleanup.clean(text)
+            used = .deterministic
         }
+
+        // 2. Dictionary post-pass (the model may re-break replaced terms).
+        text = dictionary.apply(text)
+        // 3. Safety net: collapse accidental doubled words the model missed.
+        text = TextRepair.removeAccidentalDuplicates(text)
+        // 4. Spacing at the insertion point.
+        if hasSurroundingText {
+            // The field is readable and already has text: on the deterministic/
+            // short path the model never saw the context, so fix casing here
+            // (mid-sentence continuations shouldn't capitalize), then compute the
+            // exact leading seam — one space, or none before punctuation.
+            if settings.formattingEnabled && used == .deterministic {
+                text = TextRepair.lowercaseContinuationIfMidSentence(text, precedingText: hints.precedingText)
+            }
+            text = TextRepair.joinAtCursor(text, precedingText: hints.precedingText)
+        } else {
+            // Can't see the field (empty, or an Electron/web app like Claude
+            // Desktop that hides its text): append a trailing space so back-to-
+            // back dictations stay separated.
+            if separateAtEnd { text = TextRepair.appendSeparatorSpace(text) }
+        }
+        return (text, used)
+    }
+
+    /// A dictation recorded somewhere else (the Otto keyboard on the phone), 16 kHz mono.
+    /// `precedingText` is what that text field holds before the cursor.
+    func dictateRemote(samples: [Float], precedingText: String?) async throws -> (raw: String, text: String, formatter: FormatterID) {
+        let raw = try await engine.transcribe(samples, sampleRate: 16_000).text
+        let hints = FormattingHints(vocabulary: dictionary.vocabularyHints, targetBundleID: nil,
+                                    precedingText: precedingText, followingText: nil)
+        let has = precedingText.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let (text, used) = await clean(raw, hints: hints, hasSurroundingText: has, learn: false, separateAtEnd: false)
+        return (raw, text, used)
     }
 
     private func insert(_ text: String, viaClipboard: Bool) {

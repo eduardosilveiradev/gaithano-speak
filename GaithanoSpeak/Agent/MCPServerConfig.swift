@@ -70,7 +70,7 @@ enum MCPServerConfig {
         return directory
     }()
 
-    private static let supportDirectory: URL = {
+    static let supportDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let directory = base.appendingPathComponent("GaithanoSpeak", isDirectory: true)
