@@ -496,6 +496,10 @@ final class RecordingCoordinator {
                         let config = LocalServerFormatter.Config(endpoint: settings.localServerURL,
                                                                  model: settings.localServerModel)
                         result = try await localServer.format(text, hints: hints, config: config)
+                    } else if settings.preferredFormatter == .claude,
+                              let apiKey = AnthropicAPIFormatter.apiKey() {
+                        result = try await AnthropicAPIFormatter().format(
+                            text, hints: hints, model: settings.formatterClaudeModel, apiKey: apiKey)
                     } else if settings.preferredFormatter == .claude {
                         let config = ClaudeCLIFormatter.Config(
                             model: settings.formatterClaudeModel,
